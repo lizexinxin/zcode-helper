@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -97,6 +98,13 @@ CONFIG_PATH = DATA_DIR / "config.json"
 
 HEADER_PREFIX = 4
 STATE_SCHEMA = 1
+
+# ------------------------------------------------ 主进程 loader（运行时注入）
+# asar 内只装一行 dynamic import() 指针，loader 本体与渲染模块都在磁盘上，
+# 之后改功能代码不再触碰 asar。LOADER_HOME 固定旧引擎数据目录，与 spec 一致。
+LOADER_HOME = Path.home() / ".zcode" / "zcode-helper"
+MAIN_ENTRY = "out/main/index.js"
+LOADER_IMPORT_MARK = "__zch_loader__"
 
 
 class AsarError(RuntimeError):
@@ -161,6 +169,93 @@ def zcode_version(fh, data_base: int, header: dict) -> str | None:
         return json.loads(raw.decode("utf-8")).get("version")
     except (ValueError, UnicodeDecodeError):
         return None
+
+
+# ---------------------------------------------------------------- asar 整包重打包
+
+
+def asar_integrity(data: bytes, block_size: int = 4194304) -> dict:
+    """Electron asar per-file integrity 块：整文件 hash + 分块 hash。"""
+    blocks = [
+        hashlib.sha256(data[i : i + block_size]).hexdigest()
+        for i in range(0, len(data), block_size)
+    ]
+    return {
+        "algorithm": "SHA256",
+        "hash": hashlib.sha256(data).hexdigest(),
+        "blockSize": block_size,
+        "blocks": blocks,
+    }
+
+
+def build_header(files: dict[str, bytes], unpacked: dict[str, dict] | None = None) -> dict:
+    """按路径排序依次分配 offset，构建 asar header。
+
+    unpacked：{"unpacked": true} 等无 offset 的节点，原样保留（内容在
+    app.asar.unpacked 目录，不在归档内，重打包不得丢失条目）。
+    """
+    unpacked = unpacked or {}
+    root: dict = {"files": {}}
+    offset = 0
+    for path in sorted({**files, **unpacked}):
+        parts = path.split("/")
+        node = root["files"]
+        for part in parts[:-1]:
+            node = node.setdefault(part, {"files": {}})["files"]
+        if path in unpacked:
+            node[parts[-1]] = unpacked[path]
+            continue
+        data = files[path]
+        node[parts[-1]] = {
+            "size": len(data),
+            "offset": str(offset),
+            "integrity": asar_integrity(data),
+        }
+        offset += len(data)
+    return root
+
+
+def write_asar(path: Path, files: dict[str, bytes], unpacked: dict[str, dict] | None = None) -> None:
+    """从头写一个 asar（repack 与测试共用）。
+
+    header 布局与 read_header 严格对齐：prefix=4，
+    pickle_size = 4 + header_object_size，
+    data_base = 8 + pickle_size = 16 + json_size + padding。
+    """
+    payload = json.dumps(
+        build_header(files, unpacked), ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    padding = b" " * ((-len(payload)) % 4)
+    json_size = len(payload)
+    header_object_size = 4 + json_size + len(padding)
+    pickle_size = HEADER_PREFIX + header_object_size
+    with path.open("wb") as fh:
+        fh.write(struct.pack("<4I", HEADER_PREFIX, pickle_size, header_object_size, json_size))
+        fh.write(payload)
+        fh.write(padding)
+        for p in sorted(files):
+            fh.write(files[p])
+
+
+def repack_asar(asar: Path, edits: dict[str, bytes]) -> None:
+    """整包重打包：edits 为 {asar 内路径: 新内容}，空 edits 等价于原样重写。
+
+    无 offset 的 unpacked 节点原样保留。原子替换：先写同目录 .tmp 再
+    os.replace。重算全部 integrity（fuse 虽已关闭，重算可兜底未来变化）。
+    """
+    with asar.open("rb") as fh:
+        header, data_base = read_header(fh)
+        files: dict[str, bytes] = {}
+        unpacked: dict[str, dict] = {}
+        for p, n in iter_files(header):
+            if "offset" not in n:
+                unpacked[p] = dict(n)
+                continue
+            files[p] = read_node(fh, data_base, n)
+    files.update(edits)
+    tmp = asar.parent / (asar.name + ".zch-repack.tmp")
+    write_asar(tmp, files, unpacked)
+    os.replace(tmp, asar)
 
 
 # ---------------------------------------------------------------- 补丁定义
