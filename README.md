@@ -19,15 +19,22 @@ hover 才能看到完整路径。应用补丁后直接显示完整路径，并�
 
 ## 安装
 
-### 1. 添加本地插件市场
+### 1. 添加插件市场
 
-打开 ZCode 的 **插件市场 → 添加 → 添加插件市场**，粘贴这个目录：
+打开 ZCode 的 **插件市场 → 添加 → 添加插件市场**，直接粘贴本仓库的 git 地址：
 
 ```
-/Users/zexin.li/projects/github/lizexinxin/zcode-helper/plugins
+https://github.com/lizexinxin/zcode-helper.git
 ```
 
-市场名称为 `zcode-helper-marketplace`。
+ZCode 会在仓库根目录找到 `marketplace.json`，市场名称为 `zcode-helper-marketplace`。
+
+如果网络访问 GitHub 不方便，也可以把本仓库克隆到本地后，粘贴本地目录
+（注意是**仓库根目录**，清单 `marketplace.json` 在根目录而不是 `plugins/` 下）：
+
+```
+<path-to-clone>/zcode-helper
+```
 
 ### 2. 安装插件
 
@@ -140,8 +147,8 @@ python3 tests/test_branch_daemon.py
 ## 目录结构
 
 ```
+marketplace.json                     # 插件市场清单（仓库根，ZCode 添加 git 市场时在此查找）
 plugins/
-  marketplace.json                    # 本地插件市场
   zcode-helper/
     .zcode-plugin/plugin.json         # 插件清单
     commands/                         # /zcode-helper-* 命令
