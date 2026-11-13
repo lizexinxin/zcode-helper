@@ -49,6 +49,11 @@
 
   function fixSpan(span) {
     if (!span || typeof span.getAttribute !== "function") return false;
+    // 双保险：observer 是全页监听 title，ZCode 里其它组件（composer 模型按钮、
+    // 思考强度值等）的 title 也会变化；非项目名 span 一律不碰，否则会把 title
+    // 文本写进 React 管理的节点，重渲染后新旧节点叠加（2026-11-13 实测模型名
+    // 被刷成三份、思考强度值出现「最高最高」）。
+    if (typeof span.matches === "function" && !span.matches(NAME_SELECTOR)) return false;
     var title = span.getAttribute("title");
     if (!title) return false;
 
@@ -99,7 +104,13 @@
         /* title 后到：React 可能先渲染 span（截断名、无 title）、下一次 commit
          * 才补 title。只看 childList 会漏掉这次，只能等 1s 兜底——那 1s 就是
          * 用户看到的「闪一下」。 */
-        try { fixSpan(record.target); } catch (exc) { /* 单个节点失败忽略 */ }
+        /* 必须确认 target 确实是项目名 span：这是全页 title 监听，composer 等
+         * 组件的 title 变化绝不能进 fixSpan（见 fixSpan 入口注释）。 */
+        var target = record.target;
+        if (target && target.nodeType === 1 && typeof target.matches === "function" &&
+            target.matches(NAME_SELECTOR)) {
+          try { fixSpan(target); } catch (exc) { /* 单个节点失败忽略 */ }
+        }
         continue;
       }
       var added = record.addedNodes || [];

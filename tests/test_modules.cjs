@@ -147,6 +147,34 @@ test("folder-full-path 在 title 后到时立即修正（attributes 变更）", 
   assert.strictEqual(name.textContent, FULL_PATH, "title 到位后应同步修正");
 });
 
+test("folder-full-path 不碰非项目名元素（composer 等带 title 且 title 会变的组件）", () => {
+  const dom = makeDom();
+  // 复现 2026-11-13 线上污染结构：composer 模型按钮的 label span[title]，
+  // React 打开下拉时会把 title 从模型名换成「选择模型」
+  const chip = dom.document.createElement("span");
+  chip.setAttribute("title", "external/glm-5.3-flash");
+  const value = dom.document.createElement("span");
+  value.textContent = "external/glm-5.3-flash";
+  chip.appendChild(value);
+  dom.mount(chip);
+
+  const ffp = runModuleIn(dom, "folder-full-path");
+  ffp.install();
+
+  chip.setAttribute("title", "选择模型");
+  activeObserver(dom)[0].trigger([
+    { type: "attributes", target: chip, attributeName: "title", addedNodes: [] },
+  ]);
+
+  assert.strictEqual(chip.textContent, "external/glm-5.3-flash", "文本不应被改写或插入");
+  assert.strictEqual(chip.getAttribute("data-zch-ffp"), null, "不应被打上 ffp 标记");
+
+  // 兜底全量扫描同样不能误伤
+  ffp.dispose();
+  ffp.install();
+  assert.strictEqual(chip.textContent, "external/glm-5.3-flash");
+});
+
 test("branch-badge 在 title 后到时补出徽章（attributes 变更）", async () => {
   const dom = makeDom();
   const { row, name } = dom.makeProjectRow(FULL_PATH, "zcode-helper");
