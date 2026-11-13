@@ -54,50 +54,51 @@ def git(repo: Path, *args: str) -> str:
     return out.stdout.strip()
 
 
-def test_daemon(tmp: Path) -> None:
-    proc = start_daemon()
-    try:
-        repo = tmp / "repo"
-        repo.mkdir()
-        git(repo, "init")
-        git(repo, "config", "user.email", "t@example.com")
-        git(repo, "config", "user.name", "t")
-        (repo / "a.txt").write_text("x")
-        git(repo, "add", ".")
-        git(repo, "commit", "-m", "init")
-        branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
-        assert query(str(repo))["label"] == branch, f"分支应为 {branch}"
+def test_daemon() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        proc = start_daemon()
+        try:
+            repo = tmp / "repo"
+            repo.mkdir()
+            git(repo, "init")
+            git(repo, "config", "user.email", "t@example.com")
+            git(repo, "config", "user.name", "t")
+            (repo / "a.txt").write_text("x")
+            git(repo, "add", ".")
+            git(repo, "commit", "-m", "init")
+            branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+            assert query(str(repo))["label"] == branch, f"分支应为 {branch}"
 
-        # detached HEAD → HEAD@<短SHA>
-        sha = git(repo, "rev-parse", "HEAD")
-        git(repo, "checkout", "--detach", "HEAD")
-        label = query(str(repo))["label"]
-        assert label == f"HEAD@{sha[:7]}", f"detached 应为 HEAD@{sha[:7]}，实际 {label}"
+            # detached HEAD → HEAD@<短SHA>
+            sha = git(repo, "rev-parse", "HEAD")
+            git(repo, "checkout", "--detach", "HEAD")
+            label = query(str(repo))["label"]
+            assert label == f"HEAD@{sha[:7]}", f"detached 应为 HEAD@{sha[:7]}，实际 {label}"
 
-        # 非 git 目录 / 不存在路径 → null
-        plain = tmp / "plain"
-        plain.mkdir()
-        assert query(str(plain))["label"] is None
-        assert query(str(tmp / "no-such"))["label"] is None
-        assert query("")["label"] is None
-    finally:
-        proc.terminate()
-        proc.wait(timeout=5)
+            # 非 git 目录 / 不存在路径 → null
+            plain = tmp / "plain"
+            plain.mkdir()
+            assert query(str(plain))["label"] is None
+            assert query(str(tmp / "no-such"))["label"] is None
+            assert query("")["label"] is None
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
 
 
 def main() -> int:
     failed = 0
-    with tempfile.TemporaryDirectory() as tmpdir:
-        for name, fn in sorted(globals().items()):
-            if name.startswith("test_") and callable(fn):
-                try:
-                    fn(Path(tmpdir))
-                except Exception:
-                    failed += 1
-                    print(f"FAIL  {name}")
-                    traceback.print_exc()
-                else:
-                    print(f"PASS  {name}")
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            try:
+                fn()
+            except Exception:
+                failed += 1
+                print(f"FAIL  {name}")
+                traceback.print_exc()
+            else:
+                print(f"PASS  {name}")
     print(f"\n{failed} failed / 1 total")
     return 1 if failed else 0
 
