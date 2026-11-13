@@ -28,8 +28,26 @@ def auto_apply_enabled() -> bool:
         return True
 
 
+def ensure_daemon() -> None:
+    """best-effort 拉起本地分支服务（folder-git-branch 补丁的数据源），失败静默。
+
+    独立于 autoApply 开关：daemon 是无害的本地只读服务，拉起失败也不影响补丁。
+    """
+    try:
+        subprocess.run(
+            [sys.executable, str(TOOL), "daemon", "start"],
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def main() -> int:
-    if not TOOL.is_file() or not auto_apply_enabled():
+    if not TOOL.is_file():
+        return 0
+    ensure_daemon()
+    if not auto_apply_enabled():
         return 0
     try:
         proc = subprocess.run(

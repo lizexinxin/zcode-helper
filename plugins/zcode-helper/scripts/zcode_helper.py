@@ -40,8 +40,12 @@ import base64
 import json
 import os
 import re
+import shutil
+import socket
 import struct
+import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,6 +65,9 @@ PATCH_DIR = PLUGIN_ROOT / "patches"
 DATA_DIR = Path.home() / ".zcode" / "zcode-helper"
 STATE_PATH = DATA_DIR / "state.json"
 CONFIG_PATH = DATA_DIR / "config.json"
+
+DAEMON_PORTS = list(range(39217, 39222))
+DAEMON_SCRIPT = PLUGIN_ROOT / "scripts" / "zch_branch_daemon.py"
 
 HEADER_PREFIX = 4
 STATE_SCHEMA = 1
@@ -286,6 +293,78 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
+# ---------------------------------------------------------------- payload 与本地服务
+
+
+def sync_payload_files() -> list[str]:
+    """把 inject/*.js 同步到 DATA_DIR/inject/。
+
+    index.html 补丁里的 <script> 标签按固定路径（DATA_DIR/inject/）引用
+    payload，该路径与插件 cache 目录的版本号无关，插件升级不受影响。
+    返回本次发生变化的文件名列表。
+    """
+    src_dir = PLUGIN_ROOT / "inject"
+    if not src_dir.is_dir():
+        return []
+    dst_dir = DATA_DIR / "inject"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    changed = []
+    for src in sorted(src_dir.glob("*.js")):
+        dst = dst_dir / src.name
+        if not dst.is_file() or dst.read_bytes() != src.read_bytes():
+            shutil.copyfile(src, dst)
+            changed.append(src.name)
+    return changed
+
+
+def find_daemon_port(timeout: float = 0.4) -> int | None:
+    """探测本地分支服务的端口段，返回已监听的端口；未运行返回 None。"""
+    for port in DAEMON_PORTS:
+        with socket.socket() as sock:
+            sock.settimeout(timeout)
+            try:
+                sock.connect(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
+    return None
+
+
+def cmd_daemon(args) -> int:
+    """本地分支服务管理：status 查询；start 幂等拉起（供 hook 和手动调用）。"""
+    port = find_daemon_port()
+    if args.daemon_cmd == "status":
+        if port:
+            print(f"分支服务运行中：127.0.0.1:{port}")
+            return 0
+        print("分支服务未运行（folder-git-branch 徽章不会显示）")
+        return 1
+    if port:
+        print(f"分支服务已在运行：127.0.0.1:{port}")
+        return 0
+    if not DAEMON_SCRIPT.is_file():
+        print(f"找不到服务脚本：{DAEMON_SCRIPT}", file=sys.stderr)
+        return 2
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = DATA_DIR / "daemon.log"
+    with open(log_path, "ab") as log:
+        subprocess.Popen(
+            [sys.executable, str(DAEMON_SCRIPT)],
+            stdout=log,
+            stderr=log,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    for _ in range(30):
+        port = find_daemon_port(timeout=0.2)
+        if port:
+            print(f"分支服务已启动：127.0.0.1:{port}（日志 {log_path}）")
+            return 0
+        time.sleep(0.1)
+    print(f"分支服务启动失败，请查看日志：{log_path}", file=sys.stderr)
+    return 2
+
+
 # ---------------------------------------------------------------- 应用/还原
 
 
@@ -464,6 +543,11 @@ def cmd_status(args) -> int:
     if not args.quiet:
         print(f"ZCode {version or '未知版本'}")
         print(f"asar  {asar}")
+        daemon_port = find_daemon_port(timeout=0.2)
+        if daemon_port:
+            print(f"分支服务  运行中（127.0.0.1:{daemon_port}）")
+        else:
+            print("分支服务  未运行（git 分支徽章不会显示；运行 daemon start 启动）")
         print()
     labels = {
         "applied": "已应用",
@@ -513,6 +597,8 @@ def cmd_apply(args) -> int:
         print(f"应用失败：{exc}", file=sys.stderr)
         return 2
 
+    synced = sync_payload_files()
+
     exit_code = 0
     for result in results:
         status = result["status"]
@@ -529,6 +615,8 @@ def cmd_apply(args) -> int:
             exit_code = 1
         else:
             print(f"· {result['title']}：无需修改")
+    if synced:
+        print(f"已同步注入脚本：{', '.join(synced)} → {DATA_DIR / 'inject'}")
     if exit_code == 0:
         print()
         print("完成。请完全退出 ZCode（菜单 → 退出），再重新打开，补丁才会生效。")
@@ -653,6 +741,8 @@ def cmd_doctor(args) -> int:
             print(f"文件数     {file_count}")
             print(f"ZCode      {version or '未知'}")
             print(f"可写       {check_writable(asar)}")
+            daemon_port = find_daemon_port(timeout=0.2)
+            print(f"分支服务   {'运行中（127.0.0.1:%d）' % daemon_port if daemon_port else '未运行'}")
             for patch in load_patches():
                 state, path, _located = patch_state(fh, data_base, header, patch)
                 print(f"补丁       {patch['id']}: {state} ({path or '未定位'})")
@@ -685,6 +775,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_auto = sub.add_parser("auto", help="自动修复曾应用过但已失效的补丁")
     p_auto.set_defaults(func=cmd_auto)
+
+    p_daemon = sub.add_parser("daemon", help="本地分支服务（start/status）")
+    p_daemon.add_argument("daemon_cmd", choices=["start", "status"])
+    p_daemon.set_defaults(func=cmd_daemon)
 
     sub.add_parser("list", help="列出可用补丁").set_defaults(func=cmd_list)
     sub.add_parser("doctor", help="诊断 asar 与补丁定位").set_defaults(func=cmd_doctor)
