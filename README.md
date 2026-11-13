@@ -8,24 +8,48 @@
 2. **ZCode git 分支徽章**（`zcode-branch-badge`）：编辑项目时，git 仓库源文件夹显示
    当前分支徽章（如 `⎇ main`）；非 git 目录不显示。
 
-## 效果
+## 为什么需要它
 
-```
-关闭插件：  📁 zcode-helper
-开启插件：  📁 /Users/you/projects/github/lizexinxin/zcode-helper  ⎇ main
-```
+在 ZCode 中编辑项目时，「源文件夹」一栏**只显示最内层文件夹的名字**。
+目录一多，问题立刻暴露：
 
-（完整路径来自 folder-full-path；分支徽章来自 zcode-branch-badge，两者可分开使用。）
+- **同名文件夹无法区分**：一个项目同时挂了多个同名目录（比如
+  `~/projects/gitlab/ninebot-ai/aihub` 和
+  `~/projects/gitlab/ops/argocd-application/deployYamls/aihub`），
+  界面上就是两行一模一样的 `aihub`，哪个在前哪个在后全靠记，
+  一旦选错，任务就在错误的目录里跑。
+- **看不出当前分支**：项目关联了多个 git 仓库时，界面上没有任何分支信息，
+  想确认现在在哪个分支，只能自己去终端敲 `git branch`。
+
+开启插件后，还是那个「编辑项目」界面——每个源文件夹直接显示**完整路径**，
+git 仓库额外带上**当前分支徽章**，一眼可辨：
+
+**关闭插件**：两行一模一样的 `aihub`，完全分不清谁是谁，也看不到任何分支信息：
+
+![关闭插件：同名文件夹无法区分、看不到分支](docs/images/before-plugin.png)
+
+**开启插件**：同样的项目，完整路径 + 分支徽章（`⎇ master` / `⎇ release`）：
+
+![开启插件：完整路径 + 分支徽章](docs/images/after-plugin.png)
+
+两个插件互不依赖：只装 folder-full-path 就只有完整路径；只装 branch-badge
+就只有分支徽章。
 
 ## 安装
 
 ### 1. 添加插件市场
 
-打开 ZCode 的 **插件市场 → 添加 → 添加插件市场**，直接粘贴本仓库的 git 地址：
+打开 ZCode 的 **插件市场 → 添加 → 添加插件市场**：
+
+![点击「添加插件市场」](docs/images/marketplace-add-menu.png)
+
+在弹窗里粘贴本仓库的 git 地址，勾选风险确认后点「添加插件市场」：
 
 ```
 https://github.com/lizexinxin/zcode-helper.git
 ```
+
+![粘贴仓库地址并添加](docs/images/marketplace-paste-url.png)
 
 ZCode 会在仓库根目录找到 `marketplace.json`，市场名称为 `zcode-helper-marketplace`。
 
@@ -36,10 +60,12 @@ ZCode 会在仓库根目录找到 `marketplace.json`，市场名称为 `zcode-he
 <path-to-clone>/zcode-helper
 ```
 
-### 2. 安装插件（按需二选一或都装）
+### 2. 安装并启用插件
 
-在 **Personal → zcode-helper-marketplace** 里安装想要的插件并确认已启用。
-两个插件互不依赖。
+在 **个人** 标签页里找到 `zcode-helper-marketplace`，安装想要的插件
+（两个互不依赖，按需二选一或都装），并打开开关：
+
+![开启两个插件](docs/images/plugins-enabled.png)
 
 ### 3. 首次安装 loader（一次性，之后零重启）
 
@@ -116,21 +142,6 @@ ZCode 自动更新会替换整个 `.app`，asar 指针丢失。各插件的 `Ses
 会在新会话启动时自动重装（默认开启，可在 `~/.zcode/<插件名>/config.json` 里设置
 `{"autoApply": false}` 关闭），重装后重启一次 ZCode 即恢复；渲染模块不受升级影响。
 
-## 从旧版本迁移（一次性）
-
-### 从旧版单插件 `zcode-helper` 迁移
-
-1. 旧插件运行 `/zcode-helper-restore`（还原 app.asar 原始字节）。
-2. 在 **设置 → 插件** 卸载旧插件，删除旧数据目录 `~/.zcode/zcode-helper/`
-   （新架构会重建该目录存放 loader）。
-3. 按上文安装两个新插件，重开会话让 hook 自动装 loader，重启一次 ZCode。
-
-### 从旧版两插件（等长替换路线）迁移
-
-1. 先还原旧字节补丁：任一插件脚本运行 `restore`（旧命令保留，能精确还原）。
-2. 重开会话，hook 自动 `loader install`，重启一次 ZCode。
-3. 之后插件开关即拨即生效。
-
 ## 修改引擎与模块（shared/ 真源与副本）
 
 引擎（`zcode_helper.py`）、SessionStart hook（`session-start.py`）、
@@ -198,6 +209,9 @@ plugins/
     scripts/{zcode_helper.py, zch_branch_daemon.py}
     hooks/{hooks.json, session-start.py}
     commands/  skills/
+docs/
+  images/                            # README 截图
+  superpowers/                       # 设计与实施记录（plans/specs）
 tests/
   test_asar_repack.py               # asar 重打包测试
   test_loader_commands.py           # loader 命令测试
