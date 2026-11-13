@@ -200,6 +200,150 @@ def test_pattern_not_found_is_reported():
         case.close()
 
 
+INDEX_HTML_PATH = "out/renderer/index.html"
+
+# 与 patches/folder-git-branch.json 中的 find/replace 保持一致（Task 3 校验脚本保证）
+BRANCH_FIND = (
+    "      @keyframes startup-logo-pop {\n"
+    "        0% {\n"
+    "          opacity: 0;\n"
+    "          transform: scale(0.72);\n"
+    "        }\n"
+    "\n"
+    "        38% {\n"
+    "          opacity: 1;\n"
+    "          transform: scale(1.045);\n"
+    "        }\n"
+    "\n"
+    "        58% {\n"
+    "          transform: scale(0.985);\n"
+    "        }\n"
+    "\n"
+    "        76% {\n"
+    "          transform: scale(1.008);\n"
+    "        }\n"
+    "\n"
+    "        100% {\n"
+    "          opacity: 1;\n"
+    "          transform: scale(1);\n"
+    "        }\n"
+    "      }\n"
+    "\n"
+    "      @media (prefers-reduced-motion: reduce) {\n"
+    "        .startup-logo-shell {\n"
+    "          opacity: 1;\n"
+    "          transform: scale(1);\n"
+    "          animation: none;\n"
+    "        }\n"
+    "      }\n"
+    "    </style>"
+)
+BRANCH_REPLACE = (
+    "@keyframes startup-logo-pop{"
+    "0%{opacity:0;transform:scale(0.72)}"
+    "38%{opacity:1;transform:scale(1.045)}"
+    "58%{transform:scale(0.985)}"
+    "76%{transform:scale(1.008)}"
+    "100%{opacity:1;transform:scale(1)}}"
+    "@media(prefers-reduced-motion:reduce){"
+    ".startup-logo-shell{opacity:1;transform:scale(1);animation:none}}"
+    "</style>"
+    '<script src="file:///Users/zexin.li/.zcode/zcode-helper/inject/branch-badge.js"></script>'
+)
+
+
+def make_branch_patch() -> dict:
+    return {
+        "id": "folder-git-branch",
+        "title": "编辑项目时源文件夹显示 git 分支",
+        "version": 1,
+        "locate": {
+            "pathPrefix": "out/renderer/",
+            "pathSuffix": "index.html",
+            "minSize": 20000,
+            "contains": ["zcode-startup-ready", "startup-logo-pop"],
+        },
+        "replacements": [
+            {"find": BRANCH_FIND, "replace": BRANCH_REPLACE, "expectedCount": 1},
+        ],
+    }
+
+
+def index_html_fixture() -> bytes:
+    """合成一个含目标区块的 index.html（体积超过补丁 locate 的 minSize=20000）。"""
+    head = (
+        "<!doctype html>\n<html><head><style>\n"
+        "  body.zcode-startup-ready #root { opacity: 1; }\n"
+        "  .startup-logo-shell {\n"
+        "    animation: startup-logo-pop 0.72s cubic-bezier(0.22, 1, 0.36, 1) forwards;\n"
+        "  }\n\n"
+        "  /* filler: " + "x" * 25000 + " */\n"
+    ).encode("utf-8")
+    tail = (
+        "\n</style>\n"
+        "<script type=\"module\" src=\"./assets/index-test.js\"></script>\n"
+        "</head><body><div id=\"root\"></div></body></html>"
+    ).encode("utf-8")
+    return head + BRANCH_FIND.encode("utf-8") + tail
+
+
+def test_branch_patch_roundtrip():
+    """folder-git-branch：应用后 script 标签存在、大小不变，还原后逐字节恢复。"""
+    patch = make_branch_patch()
+    case = Case()
+    try:
+        build_asar(
+            case.asar,
+            {
+                "package.json": b'{"version":"3.18.2"}',
+                INDEX_HTML_PATH: index_html_fixture(),
+            },
+        )
+        original_html = index_html_fixture()
+        size_before = case.asar.stat().st_size
+        state = zh.load_state()
+
+        with zh.open_asar(case.asar) as (fh, header, data_base):
+            before = zh.patch_state(fh, data_base, header, patch)
+            assert before[0] == "not_applied", before[0]
+            applied = zh.apply_patch(fh, data_base, header, patch, state)
+            assert applied["status"] == "applied", applied
+            after = zh.patch_state(fh, data_base, header, patch)
+            assert after[0] == "applied", after[0]
+
+        assert case.asar.stat().st_size == size_before, "asar 大小不应改变"
+        body = case.asar.read_bytes()
+        assert BRANCH_FIND.encode("utf-8") not in body, "原始区块应已被替换"
+        assert BRANCH_REPLACE.encode("utf-8") in body, "应写入替换内容（压缩 CSS + script 标签）"
+
+        # 幂等
+        with zh.open_asar(case.asar) as (fh, header, data_base):
+            again = zh.apply_patch(fh, data_base, header, patch, state)
+            assert again["status"] == "already_applied", again["status"]
+
+        # 还原逐字节一致
+        with zh.open_asar(case.asar) as (fh, _header, _data_base):
+            restored = zh.restore_patch(fh, patch, state, case.asar)
+            assert restored["status"] == "restored", restored
+        with zh.open_asar(case.asar) as (fh, header, data_base):
+            current = zh.read_asar_file(fh, data_base, header, INDEX_HTML_PATH)
+        assert current == original_html, "还原后的 index.html 应与原始内容逐字节一致"
+        assert case.asar.stat().st_size == size_before
+    finally:
+        case.close()
+
+
+def test_patch_json_matches_test_constants():
+    """仓库里的 patch JSON 与测试常量必须一致，防止两边漂移。"""
+    patch_path = ROOT / "plugins" / "zcode-helper" / "patches" / "folder-git-branch.json"
+    data = json.loads(patch_path.read_text(encoding="utf-8"))
+    rep = data["replacements"][0]
+    assert rep["find"] == BRANCH_FIND, "patch JSON 的 find 与测试常量不一致"
+    assert rep["replace"] == BRANCH_REPLACE, "patch JSON 的 replace 与测试常量不一致"
+    assert len(rep["replace"].encode("utf-8")) <= len(rep["find"].encode("utf-8")), "replace 必须不长于 find"
+    assert data["locate"]["pathSuffix"] == "index.html"
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0
