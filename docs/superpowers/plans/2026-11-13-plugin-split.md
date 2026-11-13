@@ -1319,8 +1319,8 @@ git commit -m "test: shared/ 真源与插件副本的 sha256 同步校验"
 ## 效果
 
 ```
-应用前：  📁 aihub
-应用后：  📁 /Users/you/projects/gitlab/ninebot-ai/aihub  ⎇ main
+应用前：  📁 zcode-helper
+应用后：  📁 /Users/you/projects/github/lizexinxin/zcode-helper  ⎇ main
 ```
 
 （完整路径来自 folder-full-path；分支徽章来自 zcode-branch-badge，两者可分开使用。）
