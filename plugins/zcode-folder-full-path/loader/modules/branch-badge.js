@@ -16,6 +16,10 @@
   var inflight = new Map(); // path -> Promise
   var observer = null;
 
+  // 重复注入时先拆掉旧实例（observer/徽章 DOM/缓存），避免泄漏
+  var prev = window.__zchModules && window.__zchModules[ID];
+  if (prev && typeof prev.dispose === "function") prev.dispose();
+
   function ping(port) {
     return new Promise(function (resolve) {
       var done = false;
