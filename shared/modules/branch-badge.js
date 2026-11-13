@@ -22,13 +22,18 @@
       var timer = setTimeout(function () {
         if (!done) { done = true; resolve(false); }
       }, 800);
-      fetch("http://127.0.0.1:" + port + "/ping")
-        .then(function (resp) {
-          if (!done) { done = true; clearTimeout(timer); resolve(resp.ok); }
-        })
-        .catch(function () {
-          if (!done) { done = true; resolve(false); }
-        });
+      try {
+        fetch("http://127.0.0.1:" + port + "/ping")
+          .then(function (resp) {
+            if (!done) { done = true; clearTimeout(timer); resolve(resp.ok); }
+          })
+          .catch(function () {
+            if (!done) { done = true; resolve(false); }
+          });
+      } catch (exc) {
+        // fetch 不可用等同步异常：视为探测失败
+        if (!done) { done = true; resolve(false); }
+      }
     });
   }
 
