@@ -10,7 +10,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 
-const HOME_DIR = path.join(os.homedir(), ".zcode", "zcode-helper");
+const HOME_DIR =
+  process.env.ZCODE_LOADER_HOME || path.join(os.homedir(), ".zcode", "zcode-helper");
 const MODULES_DIR = path.join(HOME_DIR, "modules");
 const CONFIG_PATH = path.join(os.homedir(), ".zcode", "cli", "config.json");
 const LOG_PATH = path.join(HOME_DIR, "loader.log");
@@ -54,20 +55,24 @@ function readEnabled() {
 }
 
 function runnerFor(id, on) {
-  /* 每次注入都从磁盘现读模块文件：改模块代码，下次注入即用新版。 */
+  /* 每次注入都从磁盘现读模块文件：改模块代码，下次注入即用新版。
+   * 注意 executeJavaScript 按普通脚本编译，顶层 return 是语法错误，
+   * 必须整体包进 IIFE，返回值即 executeJavaScript 的 Promise 结果。 */
   const file = path.join(MODULES_DIR, id + ".js");
   let code;
   try {
     code = fs.readFileSync(file, "utf8");
   } catch (exc) {
     log("读取模块 " + id + " 失败: " + (exc && exc.message));
-    return 'return "missing-file";';
+    return '(function(){return "missing-file";})()';
   }
   const call = on ? 'm.install()||"ok"' : 'm.dispose()||"ok"';
   return (
+    "(function(){" +
     "window.__zchModules=window.__zchModules||{};(function(){" + code + "}());" +
     "var m=window.__zchModules[" + JSON.stringify(id) + "];" +
-    "return m?(" + call + '):"missing";'
+    "return m?(" + call + '):"missing";' +
+    "})()"
   );
 }
 
@@ -147,7 +152,7 @@ function activate() {
   return "ok";
 }
 
-module.exports = { activate, enabledModules, MODULE_IDS };
+module.exports = { activate, enabledModules, MODULE_IDS, runnerFor };
 
 /* 独立自检：node shared/loader.cjs 打印当前启用模块与模块目录 */
 if (require.main === module) {
