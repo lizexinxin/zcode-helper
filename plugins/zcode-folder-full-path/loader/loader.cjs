@@ -85,18 +85,26 @@ function applyToContents(wc, enabled) {
     return;
   }
   if (type !== "window") return; // 只注主窗口类页面
+  let label = "";
+  try {
+    label = " (" + (wc.getURL() || "").slice(-60) + ")";
+  } catch (_) {}
   for (const id of MODULE_IDS) {
     const want = enabled.includes(id);
-    wc.executeJavaScript(runnerFor(id, want), true).catch((exc) =>
-      log("注入 " + id + "(" + want + ") 失败: " + (exc && exc.message))
-    );
+    wc.executeJavaScript(runnerFor(id, want), true)
+      .then((res) => log("注入 " + id + "(" + want + ") → " + res + label))
+      .catch((exc) =>
+        log("注入 " + id + "(" + want + ") 失败: " + (exc && exc.message) + label)
+      );
   }
 }
 
-function applyAll(enabled) {
+function applyAll(enabled, why) {
   try {
     const { webContents } = require("electron");
-    for (const wc of webContents.getAllWebContents()) applyToContents(wc, enabled);
+    const all = webContents.getAllWebContents();
+    log("applyAll(" + (why || "") + "): 目标 " + all.length + " 个");
+    for (const wc of all) applyToContents(wc, enabled);
   } catch (exc) {
     log("applyAll 失败: " + (exc && exc.message));
   }
@@ -105,6 +113,7 @@ function applyAll(enabled) {
 function replayOnLoad(wc) {
   /* 页面刷新/新窗口加载完成后重放；模块自身幂等，重复调用无副作用。 */
   wc.on("did-finish-load", () => {
+    log("did-finish-load，300ms 后重放");
     setTimeout(() => applyToContents(wc, currentEnabled), REPLAY_DELAY_MS);
   });
 }
@@ -122,7 +131,7 @@ function watchConfig() {
         for (const id of changed) {
           log("开关变化: " + id + " → " + (next.includes(id) ? "on" : "off"));
         }
-        if (changed.length) applyAll(next); // 全量注入靠模块幂等，简单可靠
+        if (changed.length) applyAll(next, "开关变化"); // 全量注入靠模块幂等，简单可靠
       }, DEBOUNCE_MS);
     });
   } catch (exc) {
@@ -137,14 +146,21 @@ function activate() {
   log("激活，已启用模块: " + JSON.stringify(currentEnabled));
   try {
     const { app, webContents } = require("electron");
-    app.on("web-contents-created", (_e, wc) => replayOnLoad(wc));
+    app.on("web-contents-created", (_e, wc) => {
+      let url = "";
+      try {
+        url = wc.getURL() || "";
+      } catch (_) {}
+      log("web-contents-created: type=" + (wc.getType ? wc.getType() : "?") + " url=" + url.slice(-60));
+      replayOnLoad(wc);
+    });
     // 兜底：loader 晚于已有窗口创建时，先给现有窗口补挂重放
     for (const wc of webContents.getAllWebContents()) {
       try {
         replayOnLoad(wc);
       } catch (_) { /* 已销毁的忽略 */ }
     }
-    applyAll(currentEnabled);
+    applyAll(currentEnabled, "activate");
     watchConfig();
   } catch (exc) {
     log("activate 失败: " + (exc && exc.message));
