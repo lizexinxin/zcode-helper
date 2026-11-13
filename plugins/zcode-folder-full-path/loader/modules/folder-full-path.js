@@ -24,7 +24,13 @@
 
   function fixSpan(span) {
     var title = span.getAttribute("title");
-    if (title && span.textContent !== title) span.textContent = title;
+    if (!title || span.textContent === title) return;
+    // 首次替换时记录原文，dispose 时恢复，保证关开关立即还原
+    if (!span.getAttribute("data-zch-ffp")) {
+      span.setAttribute("data-zch-ffp", "1");
+      span.setAttribute("data-zch-ffp-original", span.textContent);
+    }
+    span.textContent = title;
   }
 
   function scan(nodes) {
@@ -73,6 +79,14 @@
       if (observer) { observer.disconnect(); observer = null; }
       var s = document.getElementById(STYLE_ID);
       if (s) s.remove();
+      // 把替换过的文本恢复为原文（React 重渲染也会自然恢复，这里立即生效）
+      Array.prototype.forEach.call(
+        document.querySelectorAll("[data-zch-ffp]"),
+        function (span) {
+          var original = span.getAttribute("data-zch-ffp-original");
+          if (original != null) span.textContent = original;
+        }
+      );
       return "ok";
     },
   };
