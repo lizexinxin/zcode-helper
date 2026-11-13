@@ -2,7 +2,10 @@
 
 给 ZCode 桌面客户端打 UI 定制补丁的自用插件。
 
-当前补丁：**编辑项目时，「源文件夹」列表直接显示完整路径**，解决不同路径下同名文件夹无法区分的问题。
+当前补丁：
+
+1. **编辑项目时，「源文件夹」列表直接显示完整路径**（`folder-full-path`），解决不同路径下同名文件夹无法区分的问题。
+2. **编辑项目时，git 仓库源文件夹显示当前分支徽章**（`folder-git-branch`），如 `⎇ main`；非 git 目录不显示。
 
 ## 效果
 
@@ -48,6 +51,7 @@ hover 才能看到完整路径。应用补丁后直接显示完整路径，并�
 | `/zcode-helper-status` | 查看补丁是否已应用、是否适配当前 ZCode 版本 |
 | `/zcode-helper-apply` | 应用补丁（可重复执行，幂等） |
 | `/zcode-helper-restore` | 还原客户端原始界面 |
+| `zcode_helper.py daemon start` | 启动本地分支服务（folder-git-branch 的数据源；幂等，hook 也会自动拉起） |
 
 也可以直接运行脚本：
 
@@ -73,7 +77,24 @@ ZCode 的界面代码打包在 `/Applications/ZCode.app/Contents/Resources/app.a
 都会重新压缩 bundle，被调用函数的名字会变（3.16.3 是 `kv`，3.17.1 是 `ey`），
 用通配符后补丁不必跟着版本逐个手改。
 
-已验证 ZCode 版本：**3.16.3、3.17.1**。
+已验证 ZCode 版本：**3.16.3、3.17.1、3.18.2**。
+
+## 分支徽章的工作方式
+
+`folder-git-branch` 补丁压缩了 `index.html` 启动动画的 CSS（视觉行为不变），
+腾出的空间注入一个 `<script>` 标签，加载 `~/.zcode/zcode-helper/inject/branch-badge.js`：
+
+- payload 用 MutationObserver 盯住「编辑项目」弹窗的源文件夹行
+  （`data-testid` 语义钩子，不碰压缩后的应用代码）；
+- 每个文件夹路径向本地服务 `zch-branch-daemon` 查询分支（`/branch?path=…`），
+  daemon 执行只读的 `git branch --show-current`（detached HEAD 显示 `HEAD@<短SHA>`）；
+- daemon 端口 39217-39221（仅绑定 127.0.0.1），由 SessionStart hook 自动拉起，
+  也可 `python3 plugins/zcode-helper/scripts/zcode_helper.py daemon start` 手动启动；
+- daemon 未运行、目录不是 git 仓库、或查询失败时**静默不显示徽章**，
+  不影响 ZCode 任何功能。
+
+安全边界：daemon 只监听回环地址、只做只读 git 查询；本机其他进程理论上也能
+调用该接口（只能查询本机目录的分支，无写操作），自用场景可接受。
 
 ### 生效条件
 
@@ -95,6 +116,7 @@ hook 会提示需要适配。
 
 ```bash
 python3 tests/test_patch_engine.py
+python3 tests/test_branch_daemon.py
 ```
 
 用例在临时目录里合成一个最小 asar，覆盖 `{{ident}}` 通配、应用/还原往返、
@@ -125,6 +147,8 @@ plugins/
     commands/                         # /zcode-helper-* 命令
     skills/zcode-helper/SKILL.md      # 技能说明（含新增补丁指南）
     scripts/zcode_helper.py           # asar 补丁工具
+    inject/branch-badge.js            # folder-git-branch 的 payload（apply 时同步到 ~/.zcode/zcode-helper/inject/）
+    scripts/zch_branch_daemon.py      # 本地分支查询服务（127.0.0.1）
     patches/folder-full-path.json     # 补丁定义
     hooks/hooks.json                  # SessionStart 自动修复
     hooks/session-start.py
