@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "plugins" / "zcode-helper" / "hooks" / "session-start.py"
+SCRIPT = ROOT / "plugins" / "zcode-folder-full-path" / "hooks" / "session-start.py"
 
 
 def load_hook(name: str):
@@ -50,9 +50,12 @@ def test_daemon_start_only_when_script_present():
         hook.DAEMON_SCRIPT = hook.ROOT / "scripts" / "nope.py"
         hook.ensure_daemon()
         run.assert_not_called()
-        hook.DAEMON_SCRIPT = hook.ROOT / "scripts" / "zch_branch_daemon.py"
-        hook.ensure_daemon()
-        assert run.call_count == 1
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "zch_branch_daemon.py"
+            fake.write_text("# fake daemon script", encoding="utf-8")
+            hook.DAEMON_SCRIPT = fake
+            hook.ensure_daemon()
+            assert run.call_count == 1
 
 
 def test_plugin_name_fallback():

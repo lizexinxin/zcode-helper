@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DAEMON = ROOT / "plugins" / "zcode-helper" / "scripts" / "zch_branch_daemon.py"
+DAEMON = ROOT / "plugins" / "zcode-branch-badge" / "scripts" / "zch_branch_daemon.py"
 PORT = 39501  # 测试专用端口，避免和真实服务冲突
 BASE = f"http://127.0.0.1:{PORT}"
 

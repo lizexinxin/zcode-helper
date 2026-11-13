@@ -18,7 +18,7 @@ import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "plugins" / "zcode-helper" / "scripts" / "zcode_helper.py"
+SCRIPT = ROOT / "plugins" / "zcode-branch-badge" / "scripts" / "zcode_helper.py"
 
 _spec = importlib.util.spec_from_file_location("zcode_helper", SCRIPT)
 zh = importlib.util.module_from_spec(_spec)
@@ -239,7 +239,7 @@ BRANCH_FIND = (
     "      }\n"
     "    </style>"
 )
-BRANCH_REPLACE = (
+BRANCH_REPLACE_TEMPLATE = (
     "@keyframes startup-logo-pop{"
     "0%{opacity:0;transform:scale(0.72)}"
     "38%{opacity:1;transform:scale(1.045)}"
@@ -249,8 +249,13 @@ BRANCH_REPLACE = (
     "@media(prefers-reduced-motion:reduce){"
     ".startup-logo-shell{opacity:1;transform:scale(1);animation:none}}"
     "</style>"
-    '<script src="file:///Users/zexin.li/.zcode/zcode-helper/inject/branch-badge.js"></script>'
+    '<script src="file://{{data_dir}}/inject/branch-badge.js"></script>'
 )
+
+
+def branch_replace() -> str:
+    """展开 {{data_dir}} 后的实际 replace（Case 已把 DATA_DIR 隔离到临时目录）。"""
+    return BRANCH_REPLACE_TEMPLATE.replace("{{data_dir}}", str(zh.DATA_DIR))
 
 
 def make_branch_patch() -> dict:
@@ -265,7 +270,7 @@ def make_branch_patch() -> dict:
             "contains": ["zcode-startup-ready", "startup-logo-pop"],
         },
         "replacements": [
-            {"find": BRANCH_FIND, "replace": BRANCH_REPLACE, "expectedCount": 1},
+            {"find": BRANCH_FIND, "replace": BRANCH_REPLACE_TEMPLATE, "expectedCount": 1},
         ],
     }
 
@@ -315,7 +320,7 @@ def test_branch_patch_roundtrip():
         assert case.asar.stat().st_size == size_before, "asar 大小不应改变"
         body = case.asar.read_bytes()
         assert BRANCH_FIND.encode("utf-8") not in body, "原始区块应已被替换"
-        assert BRANCH_REPLACE.encode("utf-8") in body, "应写入替换内容（压缩 CSS + script 标签）"
+        assert branch_replace().encode("utf-8") in body, "应写入替换内容（压缩 CSS + script 标签）"
 
         # 幂等
         with zh.open_asar(case.asar) as (fh, header, data_base):
@@ -336,11 +341,11 @@ def test_branch_patch_roundtrip():
 
 def test_patch_json_matches_test_constants():
     """仓库里的 patch JSON 与测试常量必须一致，防止两边漂移。"""
-    patch_path = ROOT / "plugins" / "zcode-helper" / "patches" / "folder-git-branch.json"
+    patch_path = ROOT / "plugins" / "zcode-branch-badge" / "patches" / "folder-git-branch.json"
     data = json.loads(patch_path.read_text(encoding="utf-8"))
     rep = data["replacements"][0]
     assert rep["find"] == BRANCH_FIND, "patch JSON 的 find 与测试常量不一致"
-    assert rep["replace"] == BRANCH_REPLACE, "patch JSON 的 replace 与测试常量不一致"
+    assert rep["replace"] == BRANCH_REPLACE_TEMPLATE, "patch JSON 的 replace 与测试常量不一致"
     assert len(rep["replace"].encode("utf-8")) <= len(rep["find"].encode("utf-8")), "replace 必须不长于 find"
     assert data["locate"]["pathSuffix"] == "index.html"
 
@@ -349,7 +354,7 @@ def test_sync_payload_files():
     """inject/*.js 会被同步到 DATA_DIR/inject/，内容一致时不重复拷贝。"""
     case = Case()
     try:
-        inject_src = ROOT / "plugins" / "zcode-helper" / "inject" / "branch-badge.js"
+        inject_src = ROOT / "plugins" / "zcode-branch-badge" / "inject" / "branch-badge.js"
         assert inject_src.is_file(), "Task 2 的 payload 必须已存在"
         assert zh.sync_payload_files() == ["branch-badge.js"]
         dst = case.dir / "inject" / "branch-badge.js"

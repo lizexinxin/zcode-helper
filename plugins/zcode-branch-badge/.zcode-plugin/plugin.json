@@ -1,0 +1,11 @@
+{
+  "name": "zcode-branch-badge",
+  "version": "0.1.0",
+  "description": "ZCode「编辑项目 → 源文件夹」列表中为 git 仓库显示当前分支徽章（⎇ main）。注入本地 payload + 本地分支查询服务实现，不修改压缩 JS，失败静默不影响 ZCode 功能；修改后需完全退出并重新打开 ZCode。",
+  "author": { "name": "zexin.li" },
+  "license": "MIT",
+  "keywords": ["zcode", "ui", "git", "branch", "patch"],
+  "commands": "commands",
+  "skills": "skills",
+  "hooks": "hooks/hooks.json"
+}
