@@ -103,6 +103,7 @@ class Case:
         # 隔离真实状态文件，测试不碰 ~/.zcode/zcode-helper/
         zh.STATE_PATH = self.state_path
         zh.DATA_DIR = self.dir
+        zh.CONFIG_PATH = self.dir / "config.json"
 
     def close(self):
         self._tmp.cleanup()
@@ -362,6 +363,108 @@ def test_sync_payload_files():
         assert dst.read_bytes() == inject_src.read_bytes()
     finally:
         case.close()
+
+
+DD_FIND = '<script src="' + "P" * 120 + '"></script>'
+DD_REPLACE = '<script src="file://{{data_dir}}/inject/branch-badge.js"></script>'
+
+
+def make_dd_patch() -> dict:
+    return {
+        "id": "data-dir-token",
+        "title": "占位符补丁",
+        "version": 1,
+        "locate": {
+            "pathPrefix": "out/renderer/",
+            "pathSuffix": "index.html",
+            "minSize": 1000,
+            "contains": ["zcode-startup-ready"],
+        },
+        "replacements": [{"find": DD_FIND, "replace": DD_REPLACE, "expectedCount": 1}],
+    }
+
+
+def dd_fixture() -> bytes:
+    return (
+        b'<!doctype html><html><head><style>'
+        b"body.zcode-startup-ready{opacity:1}"
+        + b"/* " + b"x" * 2000 + b" */"
+        + DD_FIND.encode("utf-8")
+        + b"</style></head><body></body></html>"
+    )
+
+
+def test_data_dir_token_expansion():
+    """replace 中的 {{data_dir}} 展开为 DATA_DIR 绝对路径；往返与幂等不受影响。"""
+    case = Case()
+    try:
+        build_asar(
+            case.asar,
+            {
+                "package.json": b'{"version":"3.18.2"}',
+                INDEX_HTML_PATH: dd_fixture(),
+            },
+        )
+        size_before = case.asar.stat().st_size
+        state = zh.load_state()
+        patch = make_dd_patch()
+        expanded = ('<script src="file://' + str(case.dir) + '/inject/branch-badge.js"></script>').encode("utf-8")
+
+        with zh.open_asar(case.asar) as (fh, header, data_base):
+            assert zh.patch_state(fh, data_base, header, patch)[0] == "not_applied"
+            result = zh.apply_patch(fh, data_base, header, patch, state)
+            assert result["status"] == "applied", result
+
+        assert case.asar.stat().st_size == size_before
+        assert expanded in case.asar.read_bytes()
+        assert b"{{data_dir}}" not in case.asar.read_bytes(), "占位符必须被展开"
+
+        with zh.open_asar(case.asar) as (fh, header, data_base):
+            again = zh.apply_patch(fh, data_base, header, patch, state)
+            assert again["status"] == "already_applied", again["status"]
+
+        with zh.open_asar(case.asar) as (fh, _h, _d):
+            restored = zh.restore_patch(fh, patch, state, case.asar)
+            assert restored["status"] == "restored", restored
+        assert DD_FIND.encode("utf-8") in case.asar.read_bytes()
+    finally:
+        case.close()
+
+
+def test_resolve_plugin_name():
+    """插件名来自 .zcode-plugin/plugin.json；缺失 name 时报 RuntimeError。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        manifest_dir = Path(tmp) / "fake-plugin"
+        (manifest_dir / ".zcode-plugin").mkdir(parents=True)
+        manifest = manifest_dir / ".zcode-plugin" / "plugin.json"
+        manifest.write_text('{"name":"zcode-test"}', encoding="utf-8")
+        old_root = zh.PLUGIN_ROOT
+        zh.PLUGIN_ROOT = manifest_dir
+        try:
+            assert zh.resolve_plugin_name() == "zcode-test"
+            manifest.write_text("{}", encoding="utf-8")
+            try:
+                zh.resolve_plugin_name()
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("缺少 name 字段应抛 RuntimeError")
+        finally:
+            zh.PLUGIN_ROOT = old_root
+
+
+def test_set_data_dir_overrides_paths():
+    """set_data_dir 同时更新 DATA_DIR/STATE_PATH/CONFIG_PATH。"""
+    old = (zh.DATA_DIR, zh.STATE_PATH, zh.CONFIG_PATH)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "data"
+            zh.set_data_dir(target)
+            assert zh.DATA_DIR == target
+            assert zh.STATE_PATH == target / "state.json"
+            assert zh.CONFIG_PATH == target / "config.json"
+    finally:
+        zh.DATA_DIR, zh.STATE_PATH, zh.CONFIG_PATH = old
 
 
 def main() -> int:
