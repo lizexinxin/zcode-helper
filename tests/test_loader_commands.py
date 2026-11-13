@@ -43,10 +43,12 @@ def make_assets(td: Path) -> Path:
     return assets
 
 
-def run_tool(asar: Path, td: Path, *args: str) -> subprocess.CompletedProcess:
+def run_tool(asar: Path, td: Path, *args: str, extra_env: dict | None = None) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["ZCODE_LOADER_HOME"] = str(td / "loaderhome")
     env["ZCODE_LOADER_ASSETS"] = str(td / "assets")
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         [sys.executable, str(SCRIPT), "--asar", str(asar), "--data-dir", str(td / "data"), *args],
         capture_output=True,
@@ -146,6 +148,64 @@ def test_status_reports_installed_and_modules():
         assert payload["installed"] is True
         assert payload["loaderFile"] is True
         assert payload["modules"] == ["folder-full-path.js"]
+
+
+def test_toggle_writes_enabled_plugins():
+    with tempfile.TemporaryDirectory() as tmp:
+        td = Path(tmp)
+        asar = td / "app.asar"
+        zh.write_asar(asar, make_files())
+        make_assets(td)
+        cfg = td / "zcode-config.json"
+        cfg.write_text(
+            json.dumps(
+                {
+                    "plugins": {
+                        "enabledPlugins": {
+                            "zcode-folder-full-path@zcode-helper-marketplace": True,
+                            "zcode-branch-badge@zcode-helper-marketplace": True,
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        env = {"ZCODE_CONFIG": str(cfg)}
+
+        # off
+        proc = run_tool(asar, td, "--json", "loader", "toggle", "branch-badge", "off", extra_env=env)
+        assert proc.returncode == 0, proc.stderr
+        payload = last_json(proc.stdout)
+        assert payload and payload["action"] == "toggled", proc.stdout
+        assert payload["enabled"] is False and payload["previous"] is True
+        data = json.loads(cfg.read_text())
+        assert data["plugins"]["enabledPlugins"]["zcode-branch-badge@zcode-helper-marketplace"] is False
+        # 其他插件不受影响
+        assert data["plugins"]["enabledPlugins"]["zcode-folder-full-path@zcode-helper-marketplace"] is True
+
+        # toggle（缺省）按当前值取反
+        payload = last_json(
+            run_tool(asar, td, "--json", "loader", "toggle", "branch-badge", extra_env=env).stdout
+        )
+        assert payload["enabled"] is True and payload["previous"] is False
+        assert json.loads(cfg.read_text())["plugins"]["enabledPlugins"][
+            "zcode-branch-badge@zcode-helper-marketplace"
+        ] is True
+
+
+def test_toggle_reports_error_on_broken_config():
+    with tempfile.TemporaryDirectory() as tmp:
+        td = Path(tmp)
+        asar = td / "app.asar"
+        zh.write_asar(asar, make_files())
+        make_assets(td)
+        cfg = td / "zcode-config.json"
+        cfg.write_text("{ not json", encoding="utf-8")
+
+        proc = run_tool(asar, td, "--json", "loader", "toggle", "branch-badge", "off", extra_env={"ZCODE_CONFIG": str(cfg)})
+        assert proc.returncode == 2
+        payload = last_json(proc.stdout)
+        assert payload and payload["action"] == "error"
 
 
 def main() -> int:

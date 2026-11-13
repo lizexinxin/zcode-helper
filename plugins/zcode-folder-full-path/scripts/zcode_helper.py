@@ -107,6 +107,11 @@ LOADER_HOME = Path(os.environ.get("ZCODE_LOADER_HOME") or Path.home() / ".zcode"
 LOADER_ASSETS_DIR = Path(os.environ.get("ZCODE_LOADER_ASSETS") or PLUGIN_ROOT / "loader")
 MAIN_ENTRY = "out/main/index.js"
 LOADER_IMPORT_MARK = "__zch_loader__"
+# ZCode 自己保存插件开关的位置（loader 监听它）。注意：实测 ZCode 插件市场的
+# 开关 UI 在这个版本里并不写这个文件，所以另提供 `loader toggle` 直接写它。
+ZCODE_CONFIG_PATH = Path(
+    os.environ.get("ZCODE_CONFIG") or Path.home() / ".zcode" / "cli" / "config.json"
+)
 
 
 class AsarError(RuntimeError):
@@ -898,9 +903,71 @@ def sync_loader_assets() -> list[str]:
     return copied
 
 
+def module_plugin_key(enabled_map: dict, module: str) -> str:
+    """找该 module 在 enabledPlugins 里的插件 id（形如 zcode-<module>@<market>）。"""
+    for key in enabled_map:
+        if key == "zcode-" + module or key.startswith("zcode-" + module + "@"):
+            return key
+    return "zcode-" + module + "@zcode-helper-marketplace"
+
+
+def set_module_enabled(module: str, state: str) -> dict:
+    """直接写 ZCode config 的 plugins.enabledPlugins，loader 1s 内拾取生效。
+
+    state: on / off / toggle（缺省按当前值取反）。
+    用「临时文件 + os.replace」原子替换，与 ZCode 自己的写法一致。
+    """
+    try:
+        data = json.loads(ZCODE_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return {"action": "error", "reason": f"读取 {ZCODE_CONFIG_PATH} 失败: {exc}"}
+    if not isinstance(data, dict):
+        return {"action": "error", "reason": "config.json 结构异常"}
+    plugins = data.setdefault("plugins", {})
+    if not isinstance(plugins, dict):
+        return {"action": "error", "reason": "config.plugins 结构异常"}
+    enabled_map = plugins.setdefault("enabledPlugins", {})
+    if not isinstance(enabled_map, dict):
+        return {"action": "error", "reason": "config.plugins.enabledPlugins 结构异常"}
+
+    key = module_plugin_key(enabled_map, module)
+    current = bool(enabled_map.get(key))
+    target = (not current) if state == "toggle" else (state == "on")
+    enabled_map[key] = target
+
+    tmp = ZCODE_CONFIG_PATH.with_name(ZCODE_CONFIG_PATH.name + ".zch-tmp")
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, ZCODE_CONFIG_PATH)
+    except OSError as exc:
+        return {"action": "error", "reason": f"写入 {ZCODE_CONFIG_PATH} 失败: {exc}"}
+
+    return {
+        "action": "toggled",
+        "module": module,
+        "plugin": key,
+        "enabled": target,
+        "previous": current,
+    }
+
+
 def cmd_loader(args) -> int:
-    asar = Path(args.asar)
     action = args.loader_action
+    if action == "toggle":
+        result = set_module_enabled(args.module, args.state)
+        if result.get("action") == "error":
+            print(f"loader toggle 失败：{result.get('reason')}", file=sys.stderr)
+        elif not args.json:
+            print(
+                f"✓ {result['module']} 已{'开启' if result['enabled'] else '关闭'}"
+                f"（{result['plugin']}）。loader 会在 1 秒内应用；"
+                "若 2 秒后仍无变化，查看 ~/.zcode/zcode-helper/loader.log。"
+            )
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False))
+        return 0 if result.get("action") != "error" else 2
+
+    asar = Path(args.asar)
     try:
         with open_asar(asar) as pair:
             fh, header, data_base = pair
@@ -1010,6 +1077,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_loader_install.set_defaults(func=cmd_loader, loader_action="install")
     p_loader_sub.add_parser("remove", help="剥离指针（对称回滚）").set_defaults(func=cmd_loader, loader_action="remove")
     p_loader_sub.add_parser("status", help="查看 loader 安装状态").set_defaults(func=cmd_loader, loader_action="status")
+    p_loader_toggle = p_loader_sub.add_parser(
+        "toggle", help="开关某个 UI 模块（直接写 ZCode config，1s 内生效）"
+    )
+    p_loader_toggle.add_argument("module", choices=["folder-full-path", "branch-badge"])
+    p_loader_toggle.add_argument(
+        "state", nargs="?", default="toggle", choices=["on", "off", "toggle"]
+    )
+    p_loader_toggle.set_defaults(func=cmd_loader, loader_action="toggle")
 
     if HAS_DAEMON:
         p_daemon = sub.add_parser("daemon", help="本地分支服务（start/status）")
