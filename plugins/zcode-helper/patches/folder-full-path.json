@@ -1,0 +1,20 @@
+{
+  "id": "folder-full-path",
+  "title": "编辑项目时源文件夹显示完整路径",
+  "version": 2,
+  "description": "ZCode「编辑项目 → 源文件夹」列表默认只显示文件夹名（basename），同名文件夹无法区分。此补丁改为直接显示完整路径，并允许长路径换行。仅在本地项目编辑器生效，不影响远程设备编辑模式。",
+  "verifiedZcodeVersions": ["3.16.3", "3.17.1"],
+  "locate": {
+    "pathPrefix": "out/renderer/assets/",
+    "pathSuffix": ".js",
+    "minSize": 1000000,
+    "contains": ["virtual-project-root-name"]
+  },
+  "replacements": [
+    {
+      "find": "className:r?`min-w-0 flex-1 break-all text-ui-base`:`min-w-0 flex-1 truncate text-ui-base`,title:t,\"data-testid\":`virtual-project-root-name`,children:r?t:{{ident}}(t)",
+      "replace": "className:`min-w-0 flex-1 break-all text-ui-base`,title:t,\"data-testid\":`virtual-project-root-name`,children:t",
+      "expectedCount": 1
+    }
+  ]
+}
