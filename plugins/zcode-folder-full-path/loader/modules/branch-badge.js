@@ -15,6 +15,8 @@
   var cache = new Map(); // path -> {label, at}
   var inflight = new Map(); // path -> Promise
   var observer = null;
+  var scanTimer = null;
+  var SCAN_DELAY_MS = 300;
 
   // 重复注入时先拆掉旧实例（observer/徽章 DOM/缓存），避免泄漏
   var prev = window.__zchModules && window.__zchModules[ID];
@@ -117,29 +119,29 @@
     install: function () {
       var fresh = !observer;
       if (!fresh) return "already";
-      observer = new MutationObserver(function (mutations) {
-        mutations.forEach(function (m) {
-          scan(m.addedNodes);
-          // React 更新行内容（含 name span 内部文本）可能移掉徽章：
-          // 目标行仍存在时重新补挂
-          if (m.removedNodes.length && m.target instanceof Element) {
-            var row = m.target.closest ? m.target.closest(ROW_SELECTOR) : null;
-            if (row) decorate(row);
+      // 回调只做防抖调度：合并为每 300ms 最多一次全量扫描，避免 DOM 高频变动时回调风暴
+      observer = new MutationObserver(function () {
+        if (scanTimer) return;
+        scanTimer = setTimeout(function () {
+          scanTimer = null;
+          try {
+            scan([document.documentElement]);
+          } catch (exc) {
+            /* 扫描失败不影响页面 */
           }
-        });
+        }, SCAN_DELAY_MS);
       });
       observer.observe(document.documentElement, { childList: true, subtree: true });
       scan([document.documentElement]);
       discover(); // 后台探测 daemon；探测成功前 getLabel 直接返回 null（无徽章）
-      // 诊断返回值：与 folder-full-path 相同的 DOM 计数，便于真机排查
+      // 诊断返回值：DOM 计数，用于真机排查
       return (
-        "ok;rows=" + document.querySelectorAll('[data-testid="virtual-project-root-row"]').length +
-        ";names=" + document.querySelectorAll('[data-testid="virtual-project-root-name"]').length +
-        ";anyVirtualRoot=" + document.querySelectorAll('[data-testid^="virtual-project-root"]').length +
-        ";iframes=" + document.querySelectorAll("iframe").length
+        "ok;rows=" + document.querySelectorAll(ROW_SELECTOR).length +
+        ";names=" + document.querySelectorAll(NAME_SELECTOR).length
       );
     },
     dispose: function () {
+      if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
       if (observer) { observer.disconnect(); observer = null; }
       Array.prototype.forEach.call(
         document.querySelectorAll("[" + BADGE_MARK + "]"),
