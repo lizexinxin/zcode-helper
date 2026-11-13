@@ -101,8 +101,10 @@ STATE_SCHEMA = 1
 
 # ------------------------------------------------ 主进程 loader（运行时注入）
 # asar 内只装一行 dynamic import() 指针，loader 本体与渲染模块都在磁盘上，
-# 之后改功能代码不再触碰 asar。LOADER_HOME 固定旧引擎数据目录，与 spec 一致。
-LOADER_HOME = Path.home() / ".zcode" / "zcode-helper"
+# 之后改功能代码不再触碰 asar。LOADER_HOME 固定旧引擎数据目录，与 spec 一致；
+# 资产源默认为本插件目录的 loader/，测试可用环境变量重定向到临时目录。
+LOADER_HOME = Path(os.environ.get("ZCODE_LOADER_HOME") or Path.home() / ".zcode" / "zcode-helper")
+LOADER_ASSETS_DIR = Path(os.environ.get("ZCODE_LOADER_ASSETS") or PLUGIN_ROOT / "loader")
 MAIN_ENTRY = "out/main/index.js"
 LOADER_IMPORT_MARK = "__zch_loader__"
 
@@ -862,6 +864,95 @@ def cmd_list(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- 主进程 loader 命令
+
+
+def loader_import_line() -> str:
+    """写入 out/main/index.js 尾部的 dynamic import() 指针行。
+
+    activate() 由 loader.cjs 导出；失败只打日志，不影响主进程。
+    """
+    return (
+        "\n// " + LOADER_IMPORT_MARK + "\n"
+        'import("' + str(LOADER_HOME / "loader.cjs") + '")'
+        ".then(function(m){return m.activate();})"
+        '.catch(function(e){console.error("[zch-loader]", e);});\n'
+    )
+
+
+def sync_loader_assets() -> list[str]:
+    """把 loader 资产（loader.cjs + modules/*.js）拷到 LOADER_HOME。"""
+    copied: list[str] = []
+    src_loader = LOADER_ASSETS_DIR / "loader.cjs"
+    if src_loader.is_file():
+        LOADER_HOME.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src_loader, LOADER_HOME / "loader.cjs")
+        copied.append("loader.cjs")
+    src_modules = LOADER_ASSETS_DIR / "modules"
+    if src_modules.is_dir():
+        dst = LOADER_HOME / "modules"
+        dst.mkdir(parents=True, exist_ok=True)
+        for js in sorted(src_modules.glob("*.js")):
+            shutil.copyfile(js, dst / js.name)
+            copied.append("modules/" + js.name)
+    return copied
+
+
+def cmd_loader(args) -> int:
+    asar = Path(args.asar)
+    action = args.loader_action
+    try:
+        with open_asar(asar) as pair:
+            fh, header, data_base = pair
+            index = read_asar_file(fh, data_base, header, MAIN_ENTRY) or b""
+        line = loader_import_line().encode()
+
+        if action == "install":
+            synced = sync_loader_assets()
+            if LOADER_IMPORT_MARK.encode() in index:
+                result = {"action": "already", "synced": synced}
+            else:
+                if not check_writable(asar):
+                    result = {"action": "error", "reason": "not_writable"}
+                else:
+                    repack_asar(asar, {MAIN_ENTRY: index + line})
+                    result = {"action": "installed", "synced": synced}
+        elif action == "remove":
+            if LOADER_IMPORT_MARK.encode() not in index:
+                result = {"action": "not_installed"}
+            else:
+                if not check_writable(asar):
+                    result = {"action": "error", "reason": "not_writable"}
+                else:
+                    repack_asar(asar, {MAIN_ENTRY: index.replace(line, b"")})
+                    result = {"action": "removed"}
+        else:  # status
+            modules_dir = LOADER_HOME / "modules"
+            result = {
+                "installed": LOADER_IMPORT_MARK.encode() in index,
+                "loaderFile": (LOADER_HOME / "loader.cjs").is_file(),
+                "modules": sorted(p.name for p in modules_dir.glob("*.js")) if modules_dir.is_dir() else [],
+            }
+    except (OSError, AsarError) as exc:
+        result = {"action": "error", "reason": str(exc)}
+
+    if result.get("action") == "error":
+        print(f"loader {action} 失败：{result.get('reason')}", file=sys.stderr)
+    elif action == "install" and result["action"] == "installed":
+        print("✓ loader 指针已写入 app.asar。请完全退出 ZCode 后重新打开一次"
+              "（此后插件开关即时生效，不再需要重启）。")
+    elif action == "remove" and result["action"] == "removed":
+        print("✓ loader 指针已剥离。请完全退出 ZCode 后重新打开。")
+    elif action == "status" and not args.json:
+        state = "已安装" if result["installed"] else "未安装"
+        print(f"loader   {state}   loader 文件：{'在位' if result['loaderFile'] else '缺失'}"
+              f"   模块：{', '.join(result['modules']) or '无'}")
+
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    return 0 if result.get("action") != "error" else 2
+
+
 def cmd_doctor(args) -> int:
     asar = Path(args.asar)
     try:
@@ -911,6 +1002,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_auto = sub.add_parser("auto", help="自动修复曾应用过但已失效的补丁")
     p_auto.set_defaults(func=cmd_auto)
+
+    p_loader = sub.add_parser("loader", help="主进程 loader 装卸（install/remove/status）")
+    p_loader_sub = p_loader.add_subparsers(dest="loader_action", required=True)
+    p_loader_install = p_loader_sub.add_parser("install", help="同步资产并写入指针（幂等）")
+    p_loader_install.add_argument("--quiet", action="store_true", help="成功时不打印提示")
+    p_loader_install.set_defaults(func=cmd_loader, loader_action="install")
+    p_loader_sub.add_parser("remove", help="剥离指针（对称回滚）").set_defaults(func=cmd_loader, loader_action="remove")
+    p_loader_sub.add_parser("status", help="查看 loader 安装状态").set_defaults(func=cmd_loader, loader_action="status")
 
     if HAS_DAEMON:
         p_daemon = sub.add_parser("daemon", help="本地分支服务（start/status）")
