@@ -1,14 +1,14 @@
 ---
-description: 还原 zcode-helper 对 ZCode 客户端做的全部 UI 补丁（恢复 app.asar 原始字节）
+description: 还原「源文件夹完整路径」补丁对 ZCode 客户端的修改（恢复 app.asar 原始字节）
 ---
 
 用 Bash 运行。插件根目录优先取环境变量 `ZCODE_PLUGIN_ROOT`；若为空，用
-`find ~/.zcode/cli/plugins -path '*zcode-helper/scripts/zcode_helper.py' -print -quit`
+`find ~/.zcode/cli/plugins -path '*zcode-folder-full-path/scripts/zcode_helper.py' -print -quit`
 定位后取其上两级目录：
 
     python3 "${ZCODE_PLUGIN_ROOT}/scripts/zcode_helper.py" restore $ARGUMENTS
 
-脚本会按 `~/.zcode/zcode-helper/state.json` 中记录的原始字节精确写回。如果 ZCode 已经升级、记录位置的内容不再是补丁后的内容，脚本会跳过并提示，不会破坏新版本。
+脚本会按 `~/.zcode/zcode-folder-full-path/state.json` 中记录的原始字节精确写回。如果 ZCode 已经升级、记录位置的内容不再是补丁后的内容，脚本会跳过并提示，不会破坏新版本。
 
 结果处理：
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""zcode-helper：给 ZCode 桌面客户端打 UI 补丁。
+"""zcode_helper：给 ZCode 桌面客户端打 UI 补丁的通用引擎（多个插件共用同一份副本）。
 
 原理
 ----
@@ -24,7 +24,7 @@ ZCode 每次升级都会重新压缩 bundle 导致这些名字变化，用通配
     python3 zcode_helper.py auto               # 仅修复“曾应用过但已失效”的补丁（供 hook 调用）
     python3 zcode_helper.py doctor             # 诊断 asar 结构与补丁定位
 
-通用参数：--asar PATH  --json  --quiet
+通用参数：--asar PATH  --data-dir PATH  --json  --quiet
 
 退出码
 ------
@@ -62,12 +62,38 @@ else:
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 PATCH_DIR = PLUGIN_ROOT / "patches"
-DATA_DIR = Path.home() / ".zcode" / "zcode-helper"
-STATE_PATH = DATA_DIR / "state.json"
-CONFIG_PATH = DATA_DIR / "config.json"
 
 DAEMON_PORTS = list(range(39217, 39222))
 DAEMON_SCRIPT = PLUGIN_ROOT / "scripts" / "zch_branch_daemon.py"
+# 本目录是否携带分支服务脚本，决定引擎是否注册 daemon 子命令、
+# status/doctor 是否输出分支服务行（同一份引擎在不同插件下行为自适应）。
+HAS_DAEMON = DAEMON_SCRIPT.is_file()
+
+
+def resolve_plugin_name() -> str:
+    """从插件清单读插件名，用于派生数据目录 ~/.zcode/<插件名>/。"""
+    manifest = PLUGIN_ROOT / ".zcode-plugin" / "plugin.json"
+    try:
+        name = json.loads(manifest.read_text(encoding="utf-8")).get("name")
+    except (OSError, ValueError):
+        name = None
+    if not name:
+        raise RuntimeError(f"无法确定插件名：读取 {manifest} 失败或缺少 name 字段")
+    return name
+
+
+def set_data_dir(path) -> None:
+    """覆盖数据目录（CLI --data-dir；测试与非默认安装使用）。"""
+    global DATA_DIR, STATE_PATH, CONFIG_PATH
+    DATA_DIR = Path(path).expanduser()
+    STATE_PATH = DATA_DIR / "state.json"
+    CONFIG_PATH = DATA_DIR / "config.json"
+
+
+PLUGIN_NAME = resolve_plugin_name()
+DATA_DIR = Path.home() / ".zcode" / PLUGIN_NAME
+STATE_PATH = DATA_DIR / "state.json"
+CONFIG_PATH = DATA_DIR / "config.json"
 
 HEADER_PREFIX = 4
 STATE_SCHEMA = 1
@@ -211,9 +237,21 @@ def find_matches(data: bytes, rep: dict) -> list[bytes]:
     return [match.group(0) for match in pattern.finditer(data)]
 
 
+DATA_DIR_TOKEN = "{{data_dir}}"
+
+
+def expand_replace(rep: dict) -> str:
+    """replace 中的 {{data_dir}} 展开为本插件的数据目录绝对路径。
+
+    只作用于 replace（find 按字面量匹配，不做展开）；展开后若超过命中片段
+    长度，由 applied_form 的等长校验报错。
+    """
+    return rep["replace"].replace(DATA_DIR_TOKEN, str(DATA_DIR))
+
+
 def applied_form(rep: dict, matched: bytes) -> bytes:
     """把 replace 用空格补到与命中片段等长，用于等长原地替换。"""
-    replace = rep["replace"].encode("utf-8")
+    replace = expand_replace(rep).encode("utf-8")
     if len(replace) > len(matched):
         raise AsarError(
             f"补丁 replace（{len(replace)} 字节）比目标片段（{len(matched)} 字节）长，"
@@ -229,7 +267,7 @@ def replacement_state(data: bytes, rep: dict) -> tuple[list[bytes], int]:
         return matches, data.count(applied_form(rep, rep["find"].encode("utf-8")))
     # 通配命中的长度随压缩变量名变化，没法用固定补齐后的字节计数，
     # 改为统计固定的 replace 前缀（已应用时其后跟若干补位空格）。
-    return matches, data.count(rep["replace"].encode("utf-8"))
+    return matches, data.count(expand_replace(rep).encode("utf-8"))
 
 
 def patch_state(fh, data_base: int, header: dict, patch: dict) -> tuple[str, str | None, dict | None]:
@@ -543,11 +581,12 @@ def cmd_status(args) -> int:
     if not args.quiet:
         print(f"ZCode {version or '未知版本'}")
         print(f"asar  {asar}")
-        daemon_port = find_daemon_port(timeout=0.2)
-        if daemon_port:
-            print(f"分支服务  运行中（127.0.0.1:{daemon_port}）")
-        else:
-            print("分支服务  未运行（git 分支徽章不会显示；运行 daemon start 启动）")
+        if HAS_DAEMON:
+            daemon_port = find_daemon_port(timeout=0.2)
+            if daemon_port:
+                print(f"分支服务  运行中（127.0.0.1:{daemon_port}）")
+            else:
+                print("分支服务  未运行（git 分支徽章不会显示；运行 daemon start 启动）")
         print()
     labels = {
         "applied": "已应用",
@@ -741,8 +780,9 @@ def cmd_doctor(args) -> int:
             print(f"文件数     {file_count}")
             print(f"ZCode      {version or '未知'}")
             print(f"可写       {check_writable(asar)}")
-            daemon_port = find_daemon_port(timeout=0.2)
-            print(f"分支服务   {'运行中（127.0.0.1:%d）' % daemon_port if daemon_port else '未运行'}")
+            if HAS_DAEMON:
+                daemon_port = find_daemon_port(timeout=0.2)
+                print(f"分支服务   {'运行中（127.0.0.1:%d）' % daemon_port if daemon_port else '未运行'}")
             for patch in load_patches():
                 state, path, _located = patch_state(fh, data_base, header, patch)
                 print(f"补丁       {patch['id']}: {state} ({path or '未定位'})")
@@ -761,6 +801,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--json", action="store_true", help="输出 JSON")
     parser.add_argument("--quiet", action="store_true", help="精简输出")
+    parser.add_argument("--data-dir", help="覆盖数据目录（默认 ~/.zcode/<插件名>）")
 
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("status", help="查看补丁状态").set_defaults(func=cmd_status)
@@ -776,9 +817,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_auto = sub.add_parser("auto", help="自动修复曾应用过但已失效的补丁")
     p_auto.set_defaults(func=cmd_auto)
 
-    p_daemon = sub.add_parser("daemon", help="本地分支服务（start/status）")
-    p_daemon.add_argument("daemon_cmd", choices=["start", "status"])
-    p_daemon.set_defaults(func=cmd_daemon)
+    if HAS_DAEMON:
+        p_daemon = sub.add_parser("daemon", help="本地分支服务（start/status）")
+        p_daemon.add_argument("daemon_cmd", choices=["start", "status"])
+        p_daemon.set_defaults(func=cmd_daemon)
 
     sub.add_parser("list", help="列出可用补丁").set_defaults(func=cmd_list)
     sub.add_parser("doctor", help="诊断 asar 与补丁定位").set_defaults(func=cmd_doctor)
@@ -788,6 +830,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.data_dir:
+        set_data_dir(args.data_dir)
     if not getattr(args, "func", None):
         parser.print_help()
         return 0

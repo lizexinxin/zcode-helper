@@ -1,9 +1,9 @@
 ---
-description: 查看 zcode-helper 的 UI 补丁状态（是否已应用、是否适配当前 ZCode 版本）
+description: 查看「源文件夹完整路径」补丁状态（是否已应用、是否适配当前 ZCode 版本）
 ---
 
 用 Bash 运行。插件根目录优先取环境变量 `ZCODE_PLUGIN_ROOT`；若为空，用
-`find ~/.zcode/cli/plugins -path '*zcode-helper/scripts/zcode_helper.py' -print -quit`
+`find ~/.zcode/cli/plugins -path '*zcode-folder-full-path/scripts/zcode_helper.py' -print -quit`
 定位后取其上两级目录：
 
     python3 "${ZCODE_PLUGIN_ROOT}/scripts/zcode_helper.py" status

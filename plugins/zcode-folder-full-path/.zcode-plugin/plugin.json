@@ -1,0 +1,11 @@
+{
+  "name": "zcode-folder-full-path",
+  "version": "0.1.0",
+  "description": "ZCode「编辑项目 → 源文件夹」列表直接显示完整路径（原只显示文件夹名），解决同名文件夹无法区分的问题。通过等长原地替换 app.asar 内的界面代码实现，可精确还原；修改后需完全退出并重新打开 ZCode。",
+  "author": { "name": "zexin.li" },
+  "license": "MIT",
+  "keywords": ["zcode", "ui", "patch", "asar", "folder"],
+  "commands": "commands",
+  "skills": "skills",
+  "hooks": "hooks/hooks.json"
+}

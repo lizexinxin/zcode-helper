@@ -1,4 +1,4 @@
-/* zcode-helper: 编辑项目弹窗源文件夹显示 git 分支徽章。
+/* zcode-branch-badge: 编辑项目弹窗源文件夹显示 git 分支徽章。
  * 由 index.html 补丁注入的 <script> 加载（file:// 固定路径）。
  * 数据来自 zch-branch-daemon（127.0.0.1:39217-39221）；服务不在时静默降级。 */
 (function () {

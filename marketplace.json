@@ -1,21 +1,21 @@
 {
   "name": "zcode-helper-marketplace",
-  "description": "自用 ZCode 客户端 UI 定制补丁市场。当前提供 zcode-helper：编辑项目时源文件夹显示完整路径、git 仓库显示分支徽章（修改 app.asar，需完全退出并重开 ZCode）。",
+  "description": "自用 ZCode 客户端 UI 定制补丁市场，包含两个独立插件：zcode-folder-full-path（源文件夹显示完整路径）、zcode-branch-badge（git 分支徽章）。均修改 app.asar，需完全退出并重开 ZCode。",
   "owner": {
     "name": "zexin.li"
   },
   "plugins": [
     {
-      "name": "zcode-helper",
-      "source": "./plugins/zcode-helper",
+      "name": "zcode-folder-full-path",
+      "source": "./plugins/zcode-folder-full-path",
       "version": "0.1.0",
-      "description": "ZCode 桌面客户端 UI 定制补丁。当前包含：编辑项目时源文件夹显示完整路径、git 仓库显示分支徽章。通过等长原地替换 app.asar 内的界面代码实现，可精确还原；修改后需完全退出并重新打开 ZCode。",
-      "displayName": "ZCode Helper",
+      "description": "ZCode 编辑项目时源文件夹显示完整路径（原只显示文件夹名）。通过等长原地替换 app.asar 内的界面代码实现，可精确还原；修改后需完全退出并重新打开 ZCode。",
+      "displayName": "ZCode Folder Full Path",
       "displayName_i18n": {
-        "zh-CN": "ZCode 助手"
+        "zh-CN": "ZCode 源文件夹完整路径"
       },
       "description_i18n": {
-        "zh-CN": "ZCode 桌面客户端 UI 定制补丁。当前包含：编辑项目时源文件夹显示完整路径、git 仓库显示分支徽章。通过等长原地替换 app.asar 内的界面代码实现，可精确还原；修改后需完全退出并重新打开 ZCode。"
+        "zh-CN": "ZCode 编辑项目时源文件夹显示完整路径（原只显示文件夹名）。通过等长原地替换 app.asar 内的界面代码实现，可精确还原；修改后需完全退出并重新打开 ZCode。"
       },
       "category": "developer-tools",
       "keywords": [
@@ -23,6 +23,26 @@
         "ui",
         "patch",
         "asar"
+      ]
+    },
+    {
+      "name": "zcode-branch-badge",
+      "source": "./plugins/zcode-branch-badge",
+      "version": "0.1.0",
+      "description": "ZCode 编辑项目时为 git 仓库源文件夹显示当前分支徽章（⎇ main）。注入本地 payload + 本地分支查询服务实现，失败静默不影响 ZCode 功能；修改后需完全退出并重新打开 ZCode。",
+      "displayName": "ZCode Branch Badge",
+      "displayName_i18n": {
+        "zh-CN": "ZCode git 分支徽章"
+      },
+      "description_i18n": {
+        "zh-CN": "ZCode 编辑项目时为 git 仓库源文件夹显示当前分支徽章（⎇ main）。注入本地 payload + 本地分支查询服务实现，失败静默不影响 ZCode 功能；修改后需完全退出并重新打开 ZCode。"
+      },
+      "category": "developer-tools",
+      "keywords": [
+        "zcode",
+        "ui",
+        "git",
+        "branch"
       ]
     }
   ]
