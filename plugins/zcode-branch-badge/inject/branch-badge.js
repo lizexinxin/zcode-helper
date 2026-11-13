@@ -67,7 +67,7 @@
     el.setAttribute(BADGE_MARK, "1");
     el.textContent = "⎇ " + label;
     el.style.cssText =
-      "flex:none;margin-left:2px;white-space:nowrap;" +
+      "display:block;width:fit-content;margin-top:3px;white-space:nowrap;" +
       "border:1px solid rgba(128,128,128,.35);border-radius:4px;padding:1px 6px;";
     return el;
   }
@@ -85,7 +85,9 @@
       if (row.querySelector("[" + BADGE_MARK + "]")) return;
       var target = row.querySelector(NAME_SELECTOR);
       if (!target) return;
-      target.after(makeBadge(label));
+      // 插入 name span 内部并 display:block，徽章换行显示在路径正下方，
+      // 不再作为行 flex 的兄弟项挤压路径宽度
+      target.appendChild(makeBadge(label));
     });
   }
 
@@ -103,10 +105,10 @@
     var mo = new MutationObserver(function (mutations) {
       mutations.forEach(function (m) {
         scan(m.addedNodes);
-        // React 更新行内容可能移掉徽章：目标行仍存在时重新补挂
-        if (m.removedNodes.length && m.target instanceof Element &&
-            m.target.matches(ROW_SELECTOR)) {
-          decorate(m.target);
+        // React 更新行内容（含 name span 内部文本）可能移掉徽章：目标行仍存在时重新补挂
+        if (m.removedNodes.length && m.target instanceof Element) {
+          var row = m.target.closest ? m.target.closest(ROW_SELECTOR) : null;
+          if (row) decorate(row);
         }
       });
     });
