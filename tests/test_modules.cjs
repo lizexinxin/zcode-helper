@@ -67,6 +67,7 @@ function runModule(id) {
     window: dom.window,
     document: dom.document,
     Element: class {},
+    MutationObserver: dom.window.MutationObserver,
     setTimeout,
     clearTimeout,
     Date,
