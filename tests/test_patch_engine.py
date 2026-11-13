@@ -100,7 +100,7 @@ class Case:
         self.dir = Path(self._tmp.name)
         self.asar = self.dir / "app.asar"
         self.state_path = self.dir / "state.json"
-        # 隔离真实状态文件，测试不碰 ~/.zcode/zcode-helper/
+        # 隔离真实状态文件，测试不碰 ~/.zcode/<插件名>/
         zh.STATE_PATH = self.state_path
         zh.DATA_DIR = self.dir
         zh.CONFIG_PATH = self.dir / "config.json"
