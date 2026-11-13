@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SessionStart hook：检查本插件的 UI 补丁状态（多个插件共用同一份副本）。
+"""SessionStart hook：确保主进程 loader 在位（多个插件共用同一份副本）。
 
-- 从未应用过：静默退出。
-- 之前应用过、ZCode 升级后失效：自动重新应用（autoApply 默认开启），并提示重启。
-- 新版本代码结构变化导致无法匹配：提示用户适配。
+- autoApply 开启（默认）：调用引擎 loader install（幂等）——首次安装时
+  重打包 asar 写入指针并提示重启一次；已在位时静默。
 - 仅当本插件携带分支服务脚本（zch_branch_daemon.py）时，best-effort 拉起 daemon。
+
+旧版等长替换补丁路线已退役；ZCode 升级覆盖 asar 后，下次会话启动会自动重装指针。
 
 只输出简短结论到 stdout（会进入模型上下文）。
 """
@@ -43,9 +44,9 @@ def auto_apply_enabled() -> bool:
 
 
 def ensure_daemon() -> None:
-    """best-effort 拉起本地分支服务（folder-git-branch 补丁的数据源），失败静默。
+    """best-effort 拉起本地分支服务（分支徽章的数据源），失败静默。
 
-    独立于 autoApply 开关：daemon 是无害的本地只读服务，拉起失败也不影响补丁。
+    独立于 autoApply 开关：daemon 是无害的本地只读服务。
     仅当本插件携带 daemon 脚本时才尝试。
     """
     if not DAEMON_SCRIPT.is_file():
@@ -60,22 +61,17 @@ def ensure_daemon() -> None:
         pass
 
 
-def main() -> int:
-    if not TOOL.is_file():
-        return 0
-    ensure_daemon()
-    if not auto_apply_enabled():
-        return 0
+def ensure_loader() -> None:
+    """幂等安装主进程 loader；首次安装（重打包 asar）时提示重启一次。"""
     try:
         proc = subprocess.run(
-            [sys.executable, str(TOOL), "--json", "auto"],
+            [sys.executable, str(TOOL), "--json", "loader", "install", "--quiet"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=120,  # 首次安装需整包重打包，可达数十秒
         )
     except (OSError, subprocess.SubprocessError):
-        return 0
-
+        return
     payload = None
     for line in reversed(proc.stdout.strip().splitlines()):
         line = line.strip()
@@ -85,32 +81,20 @@ def main() -> int:
                 break
             except ValueError:
                 continue
-    if not payload:
-        return 0
+    if payload and payload.get("action") == "installed":
+        print(
+            f"[{PLUGIN_NAME}] 已安装 UI 注入 loader（app.asar 已重打包）。"
+            "请完全退出 ZCode 后重新打开一次，此后插件开关即时生效、无需重启。"
+        )
 
-    reason = payload.get("reason")
-    if reason == "never_applied":
-        return 0
 
-    repaired = payload.get("repaired") or []
-    broken = payload.get("broken") or []
-    if repaired:
-        print(
-            f"[{PLUGIN_NAME}] 检测到 ZCode 升级后 UI 补丁失效，已自动重新应用："
-            + "、".join(repaired)
-            + "。请完全退出 ZCode 后重新打开，补丁才会生效。"
-        )
-    if broken:
-        names = "、".join(item.get("id", "?") for item in broken)
-        print(
-            f"[{PLUGIN_NAME}] 以下 UI 补丁无法适配当前 ZCode 版本：{names}。"
-            "需要更新补丁定义；运行对应插件的 status 命令查看详情。"
-        )
-    if reason == "not_writable":
-        print(
-            f"[{PLUGIN_NAME}] ZCode 的 app.asar 不可写，无法自动修复 UI 补丁。"
-            "请运行对应插件的 apply 命令查看处理建议。"
-        )
+def main() -> int:
+    if not TOOL.is_file():
+        return 0
+    ensure_daemon()
+    if not auto_apply_enabled():
+        return 0
+    ensure_loader()
     return 0
 
 

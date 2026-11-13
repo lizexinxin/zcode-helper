@@ -339,33 +339,11 @@ def test_branch_patch_roundtrip():
         case.close()
 
 
-def test_patch_json_matches_test_constants():
-    """仓库里的 patch JSON 与测试常量必须一致，防止两边漂移。"""
-    patch_path = ROOT / "plugins" / "zcode-branch-badge" / "patches" / "folder-git-branch.json"
-    data = json.loads(patch_path.read_text(encoding="utf-8"))
-    rep = data["replacements"][0]
-    assert rep["find"] == BRANCH_FIND, "patch JSON 的 find 与测试常量不一致"
-    assert rep["replace"] == BRANCH_REPLACE_TEMPLATE, "patch JSON 的 replace 与测试常量不一致"
-    assert len(rep["replace"].encode("utf-8")) <= len(rep["find"].encode("utf-8")), "replace 必须不长于 find"
-    assert data["locate"]["pathSuffix"] == "index.html"
-
-
-def test_sync_payload_files():
-    """inject/*.js 会被同步到 DATA_DIR/inject/，内容一致时不重复拷贝。"""
+def test_sync_payload_files_empty_without_inject_dir():
+    """等长替换路线退役后不再携带 inject/；同步函数应为无害空操作。"""
     case = Case()
     try:
-        inject_src = ROOT / "plugins" / "zcode-branch-badge" / "inject" / "branch-badge.js"
-        assert inject_src.is_file(), "Task 2 的 payload 必须已存在"
-        assert zh.sync_payload_files() == ["branch-badge.js"]
-        dst = case.dir / "inject" / "branch-badge.js"
-        assert dst.is_file()
-        assert dst.read_bytes() == inject_src.read_bytes()
-        # 第二次同步：无变化 → 返回空列表
         assert zh.sync_payload_files() == []
-        # 源文件变更后再次同步 → 重新拷贝
-        dst.write_bytes(b"old")
-        assert zh.sync_payload_files() == ["branch-badge.js"]
-        assert dst.read_bytes() == inject_src.read_bytes()
     finally:
         case.close()
 

@@ -6,6 +6,7 @@
 """
 
 import importlib.util
+import io
 import sys
 import tempfile
 import traceback
@@ -65,6 +66,54 @@ def test_plugin_name_fallback():
         root = Path(tmp) / "some-plugin"
         root.mkdir()
         assert hook._plugin_name(root) == "some-plugin"
+
+
+def _fake_proc(stdout: str):
+    proc = mock.Mock()
+    proc.stdout = stdout
+    proc.returncode = 0
+    return proc
+
+
+def test_main_calls_loader_install():
+    """autoApply 开启时，main 应调用引擎的 loader install --quiet（幂等）。"""
+    hook = load_hook("hook_loader_install")
+    with mock.patch.object(hook.subprocess, "run") as run:
+        run.return_value = _fake_proc('{"action": "already"}')
+        with mock.patch("sys.stdout"):
+            hook.main()
+        assert run.call_count == 1
+        argv = run.call_args[0][0]
+        assert "loader" in argv and "install" in argv and "--quiet" in argv
+
+
+def test_installed_prints_restart_hint():
+    """首次安装（action=installed）时提示完全退出重开。"""
+    hook = load_hook("hook_installed_hint")
+    with mock.patch.object(hook.subprocess, "run") as run:
+        run.return_value = _fake_proc('{"action": "installed", "synced": ["loader.cjs"]}')
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            assert hook.main() == 0
+        assert "重新打开" in buf.getvalue()
+
+
+def test_already_installed_is_silent():
+    """loader 已在位时无输出（不刷会话上下文）。"""
+    hook = load_hook("hook_already_silent")
+    with mock.patch.object(hook.subprocess, "run") as run:
+        run.return_value = _fake_proc('{"action": "already"}')
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            assert hook.main() == 0
+        assert buf.getvalue() == ""
+
+
+def test_subprocess_failure_is_silent():
+    """引擎调用失败时静默退出，不抛异常。"""
+    hook = load_hook("hook_sub_fail")
+    with mock.patch.object(hook.subprocess, "run", side_effect=OSError("boom")):
+        assert hook.main() == 0
 
 
 def main() -> int:
