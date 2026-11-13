@@ -115,25 +115,75 @@
     });
   }
 
+  /* 从某个节点向上找它所在的 row（title 变更时 record.target 是 name span） */
+  function rowOf(el) {
+    var node = el;
+    while (node && node.nodeType === 1) {
+      if (node.matches(ROW_SELECTOR)) return node;
+      node = node.parentNode;
+    }
+    return null;
+  }
+
+  /* 回调里同步修饰新增节点：防抖的 300ms 会让用户看到「徽章先没有、随后
+   * 才出现」。同步只处理本次变动的节点，全量扫描仍走防抖兜底。 */
+  function onMutations(records) {
+    var dirty = false;
+    for (var i = 0; i < records.length; i++) {
+      var record = records[i];
+      if (record.type === "attributes") {
+        var owner = rowOf(record.target);
+        if (owner) {
+          try { decorate(owner); } catch (exc) { /* 单个失败不影响其他 */ }
+        }
+        continue;
+      }
+      var added = record.addedNodes || [];
+      for (var j = 0; j < added.length; j++) {
+        var node = added[j];
+        if (!node || node.nodeType !== 1) continue;
+        dirty = true;
+        try { scan([node]); } catch (exc) { /* 以上同 */ }
+      }
+    }
+    if (dirty) scheduleFullScan();
+  }
+
+  function scheduleFullScan() {
+    if (scanTimer) return;
+    scanTimer = setTimeout(function () {
+      scanTimer = null;
+      try {
+        scan([document.documentElement]);
+      } catch (exc) {
+        /* 扫描失败不影响页面 */
+      }
+    }, SCAN_DELAY_MS);
+  }
+
   window.__zchModules[ID] = {
     install: function () {
       var fresh = !observer;
       if (!fresh) return "already";
-      // 回调只做防抖调度：合并为每 300ms 最多一次全量扫描，避免 DOM 高频变动时回调风暴
-      observer = new MutationObserver(function () {
-        if (scanTimer) return;
-        scanTimer = setTimeout(function () {
-          scanTimer = null;
-          try {
-            scan([document.documentElement]);
-          } catch (exc) {
-            /* 扫描失败不影响页面 */
-          }
-        }, SCAN_DELAY_MS);
+      observer = new MutationObserver(onMutations);
+      observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["title"], // title 后到时也要补扫，否则徽章永远出不来
       });
-      observer.observe(document.documentElement, { childList: true, subtree: true });
       scan([document.documentElement]);
-      discover(); // 后台探测 daemon；探测成功前 getLabel 直接返回 null（无徽章）
+      // 后台探测 daemon；探测成功前 getLabel 直接返回 null（无徽章）。
+      // 探测完成后再补扫一次，否则「弹窗先渲染、daemon 后就绪」时徽章要等
+      // 下一次 DOM 变动才出现（页面静止就永远不显示）。
+      discover().then(function (ok) {
+        if (!ok || !observer) return; // dispose 之后返回则不补扫
+        try {
+          scan([document.documentElement]);
+        } catch (exc) {
+          /* 补扫失败不影响页面 */
+        }
+      });
       // 诊断返回值：DOM 计数，用于真机排查
       return (
         "ok;rows=" + document.querySelectorAll(ROW_SELECTOR).length +
