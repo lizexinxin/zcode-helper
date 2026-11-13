@@ -13,8 +13,8 @@ ZCode 的「编辑项目 → 源文件夹」列表原本只显示文件夹名（
 hover 才能看到完整路径。应用补丁后直接显示完整路径，并允许长路径换行：
 
 ```
-应用前：  📁 aihub
-应用后：  📁 /Users/you/projects/gitlab/ninebot-ai/aihub
+应用前：  📁 zcode-helper
+应用后：  📁 /Users/you/projects/github/lizexinxin/zcode-helper
 ```
 
 ## 安装
