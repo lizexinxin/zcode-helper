@@ -13,13 +13,22 @@
 
   window.__zchModules[ID] = {
     install: function () {
-      if (document.getElementById(STYLE_ID)) return "already";
-      var s = document.createElement("style");
-      s.id = STYLE_ID;
-      s.setAttribute("data-zch-module", ID);
-      s.textContent = CSS;
-      document.head.appendChild(s);
-      return "ok";
+      var fresh = !document.getElementById(STYLE_ID);
+      if (fresh) {
+        var s = document.createElement("style");
+        s.id = STYLE_ID;
+        s.setAttribute("data-zch-module", ID);
+        s.textContent = CSS;
+        document.head.appendChild(s);
+      }
+      // 诊断返回值：行/名称元素计数，用于真机排查选择器是否命中
+      var diag =
+        "rows=" + document.querySelectorAll('[data-testid="virtual-project-root-row"]').length +
+        ";names=" + document.querySelectorAll('[data-testid="virtual-project-root-name"]').length +
+        ";anyVirtualRoot=" + document.querySelectorAll('[data-testid^="virtual-project-root"]').length +
+        ";iframes=" + document.querySelectorAll("iframe").length +
+        ";styleInDoc=" + !!document.getElementById(STYLE_ID);
+      return (fresh ? "ok;" : "already;") + diag;
     },
     dispose: function () {
       var s = document.getElementById(STYLE_ID);

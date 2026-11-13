@@ -111,7 +111,8 @@
 
   window.__zchModules[ID] = {
     install: function () {
-      if (observer) return "already";
+      var fresh = !observer;
+      if (!fresh) return "already";
       observer = new MutationObserver(function (mutations) {
         mutations.forEach(function (m) {
           scan(m.addedNodes);
@@ -126,7 +127,13 @@
       observer.observe(document.documentElement, { childList: true, subtree: true });
       scan([document.documentElement]);
       discover(); // 后台探测 daemon；探测成功前 getLabel 直接返回 null（无徽章）
-      return "ok";
+      // 诊断返回值：与 folder-full-path 相同的 DOM 计数，便于真机排查
+      return (
+        "ok;rows=" + document.querySelectorAll('[data-testid="virtual-project-root-row"]').length +
+        ";names=" + document.querySelectorAll('[data-testid="virtual-project-root-name"]').length +
+        ";anyVirtualRoot=" + document.querySelectorAll('[data-testid^="virtual-project-root"]').length +
+        ";iframes=" + document.querySelectorAll("iframe").length
+      );
     },
     dispose: function () {
       if (observer) { observer.disconnect(); observer = null; }

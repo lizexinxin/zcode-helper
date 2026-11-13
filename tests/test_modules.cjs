@@ -82,8 +82,8 @@ test("两模块都按协议注册且 install/dispose 幂等", () => {
   for (const id of ["folder-full-path", "branch-badge"]) {
     const { module: m } = runModule(id);
     assert.ok(m && typeof m.install === "function" && typeof m.dispose === "function", id);
-    assert.strictEqual(m.install(), "ok");       // 首次真正安装
-    assert.strictEqual(m.install(), "already");  // 幂等：重复安装不重复动作
+    assert.ok(String(m.install()).startsWith("ok"), id);      // 首次真正安装
+    assert.ok(String(m.install()).startsWith("already"), id); // 幂等：重复安装不重复动作
     assert.strictEqual(m.dispose(), "ok");
     assert.strictEqual(m.dispose(), "ok");       // dispose 幂等
   }
@@ -93,6 +93,7 @@ test("folder-full-path 插 style、dispose 移除", () => {
   const { module: m, dom } = runModule("folder-full-path");
   m.install();
   assert.strictEqual(dom.elements.length, 1);
+  assert.ok(String(m.install()).startsWith("already"));
   const style = dom.elements[0];
   assert.strictEqual(style.tag, "style");
   assert.strictEqual(style.id, "zch-folder-full-path-style");
