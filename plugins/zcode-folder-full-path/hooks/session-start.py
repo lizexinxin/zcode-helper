@@ -9,6 +9,9 @@
   already + 未激活     → 提示「上次已自动安装，请重启一次」+ 系统通知；
   already + 已激活     → 完全静默（常态路径）；
   失败 / 无输出        → 一行简短原因，便于会话里的助手接手排查。
+- 两个插件各挂一套 hook，同一波触发会并发跑到这里：用 install.lock 的非阻塞
+  flock 串行化——没抢到锁的直接静默退出，由抢到的那个负责安装和输出，
+  避免同波「已自动安装 + 待生效」双提示、也杜绝并发重打包。
 - 激活凭证是 ~/.zcode/zcode-helper/active.json（loader activate 时写入 pid），
   用 os.kill(pid, 0) 判活，区分「指针已装但 ZCode 未重启」与「已生效」。
 - 需要重启时发 macOS 系统通知（config.json 的 "notify": false 可关）。
@@ -18,6 +21,7 @@
 旧版等长替换补丁路线已退役；ZCode 升级覆盖 asar 后，下次触发会自动重装指针。
 """
 
+import fcntl
 import json
 import os
 import platform
@@ -32,6 +36,7 @@ LOADER_HOME = Path(
     os.environ.get("ZCODE_LOADER_HOME") or Path.home() / ".zcode" / "zcode-helper"
 )
 ACTIVE_FILE = LOADER_HOME / "active.json"
+INSTALL_LOCK = LOADER_HOME / "install.lock"
 
 
 def _plugin_name(root: Path) -> str:
@@ -116,7 +121,39 @@ def ensure_daemon() -> None:
 
 
 def ensure_loader() -> None:
-    """幂等安装主进程 loader；按结果分四路输出（详见模块 docstring）。"""
+    """幂等安装主进程 loader；按结果分四路输出（详见模块 docstring）。
+
+    用 install.lock 的非阻塞 flock 串行化并发触发：没抢到锁说明同波的
+    兄弟插件 hook 正在安装，直接静默退出（由它负责输出，避免双提示）。
+    """
+    lock_fh = None
+    try:
+        LOADER_HOME.mkdir(parents=True, exist_ok=True)
+        fh = open(INSTALL_LOCK, "w")
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.close()
+            return  # 兄弟插件的 hook 正在安装
+        lock_fh = fh
+    except OSError:
+        pass  # 锁不可用：退化为无锁安装（不影响功能，只影响并发去重）
+    try:
+        _install_loader_once()
+    finally:
+        if lock_fh is not None:
+            try:
+                fcntl.flock(lock_fh, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                lock_fh.close()
+            except OSError:
+                pass
+
+
+def _install_loader_once() -> None:
+    """执行一次 loader install 并按结果分四路输出。"""
     try:
         proc = subprocess.run(
             [sys.executable, str(TOOL), "--json", "loader", "install", "--quiet"],

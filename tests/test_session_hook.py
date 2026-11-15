@@ -5,6 +5,7 @@
 运行：python3 tests/test_session_hook.py
 """
 
+import fcntl
 import importlib.util
 import io
 import json
@@ -32,6 +33,13 @@ def _dead_pid() -> int:
     proc = subprocess.Popen([sys.executable, "-c", "pass"])
     proc.wait()
     return proc.pid
+
+
+def _isolated(hook, tmp: str) -> None:
+    """把 hook 的所有落盘路径隔离进临时目录，避免测试碰真实的 ~/.zcode。"""
+    hook.LOADER_HOME = Path(tmp) / "loaderhome"
+    hook.INSTALL_LOCK = hook.LOADER_HOME / "install.lock"
+    hook.ACTIVE_FILE = hook.LOADER_HOME / "active.json"
 
 
 def _active_file(tmp: str, pid: int) -> Path:
@@ -115,7 +123,7 @@ def test_main_calls_loader_install():
     """
     hook = load_hook("hook_loader_install")
     with tempfile.TemporaryDirectory() as tmp:
-        hook.ACTIVE_FILE = Path(tmp) / "missing.json"  # 未激活 → 走提醒分支
+        _isolated(hook, tmp)  # ACTIVE_FILE 缺失 → 走提醒分支
         with mock.patch.object(hook.subprocess, "run") as run:
             run.return_value = _fake_proc('{"action": "already"}')
             with mock.patch("sys.stdout"):
@@ -131,15 +139,18 @@ def test_main_calls_loader_install():
 def test_installed_prints_restart_hint():
     """首次安装（action=installed）时提示完全退出重开。"""
     hook = load_hook("hook_installed_hint")
-    with mock.patch.object(hook.subprocess, "run") as run:
-        run.return_value = _fake_proc('{"action": "installed", "synced": ["loader.cjs"]}')
-        assert "重新打开" in _run_main(hook)
+    with tempfile.TemporaryDirectory() as tmp:
+        _isolated(hook, tmp)
+        with mock.patch.object(hook.subprocess, "run") as run:
+            run.return_value = _fake_proc('{"action": "installed", "synced": ["loader.cjs"]}')
+            assert "重新打开" in _run_main(hook)
 
 
 def test_installed_also_notifies():
     """首装时发 macOS 系统通知（osascript，随 subprocess mock 一并验证）。"""
     hook = load_hook("hook_installed_notify")
     with tempfile.TemporaryDirectory() as tmp:
+        _isolated(hook, tmp)
         hook.CONFIG = Path(tmp) / "config.json"  # 不存在 → notify 默认开
         with mock.patch.object(hook.subprocess, "run") as run:
             run.return_value = _fake_proc('{"action": "installed"}')
@@ -153,6 +164,7 @@ def test_already_with_active_loader_is_silent():
     """指针已在位且 loader 激活（active.json 的 pid 活着）时零输出。"""
     hook = load_hook("hook_already_active")
     with tempfile.TemporaryDirectory() as tmp:
+        _isolated(hook, tmp)
         hook.ACTIVE_FILE = _active_file(tmp, os.getpid())
         with mock.patch.object(hook.subprocess, "run") as run:
             run.return_value = _fake_proc('{"action": "already"}')
@@ -163,7 +175,7 @@ def test_already_without_active_loader_prompts_restart():
     """指针已在位但 loader 从未激活（无 active.json）→ 提示重启一次。"""
     hook = load_hook("hook_already_stale")
     with tempfile.TemporaryDirectory() as tmp:
-        hook.ACTIVE_FILE = Path(tmp) / "missing.json"  # 不存在 → 未激活
+        _isolated(hook, tmp)
         with mock.patch.object(hook.subprocess, "run") as run:
             run.return_value = _fake_proc('{"action": "already"}')
             assert "重新打开" in _run_main(hook)
@@ -173,34 +185,69 @@ def test_already_with_dead_pid_prompts_restart():
     """active.json 里的 pid 已退出（ZCode 没重启成功/装完没重启）→ 提示重启。"""
     hook = load_hook("hook_already_dead")
     with tempfile.TemporaryDirectory() as tmp:
+        _isolated(hook, tmp)
         hook.ACTIVE_FILE = _active_file(tmp, _dead_pid())
         with mock.patch.object(hook.subprocess, "run") as run:
             run.return_value = _fake_proc('{"action": "already"}')
             assert "重新打开" in _run_main(hook)
 
 
+def test_sibling_lock_is_silent():
+    """另一个插件的 hook 持有 install.lock 时静默退出，避免同波双提示。"""
+    hook = load_hook("hook_sibling_lock")
+    with tempfile.TemporaryDirectory() as tmp:
+        _isolated(hook, tmp)
+        hook.INSTALL_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        with open(hook.INSTALL_LOCK, "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            with mock.patch.object(hook.subprocess, "run") as run:
+                assert _run_main(hook) == ""
+                run.assert_not_called()
+
+
+def test_lock_released_after_install():
+    """安装完成后锁必须释放，后续触发能正常拿到。"""
+    hook = load_hook("hook_lock_release")
+    with tempfile.TemporaryDirectory() as tmp:
+        _isolated(hook, tmp)
+        with mock.patch.object(hook.subprocess, "run") as run:
+            run.return_value = _fake_proc('{"action": "already"}')
+            with mock.patch("sys.stdout"):
+                hook.main()  # 拿锁 → 安装 → 释放
+        # 释放后本进程可再次加锁（fcntl 对同一进程的不同 fd 也互斥）
+        with open(hook.INSTALL_LOCK, "w") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def test_error_action_prints_reason():
     """安装失败（如 not_writable）时输出一行简短原因，不再静默。"""
     hook = load_hook("hook_error_reason")
-    with mock.patch.object(hook.subprocess, "run") as run:
-        run.return_value = _fake_proc('{"action": "error", "reason": "not_writable"}')
-        output = _run_main(hook)
-        assert "失败" in output and "不可写" in output
+    with tempfile.TemporaryDirectory() as tmp:
+        _isolated(hook, tmp)
+        with mock.patch.object(hook.subprocess, "run") as run:
+            run.return_value = _fake_proc('{"action": "error", "reason": "not_writable"}')
+            output = _run_main(hook)
+            assert "失败" in output and "不可写" in output
 
 
 def test_no_payload_prints_hint():
     """引擎无 JSON 输出（超时/异常）时输出排查提示。"""
     hook = load_hook("hook_no_payload")
-    with mock.patch.object(hook.subprocess, "run") as run:
-        run.return_value = _fake_proc("")
-        assert "排查" in _run_main(hook)
+    with tempfile.TemporaryDirectory() as tmp:
+        _isolated(hook, tmp)
+        with mock.patch.object(hook.subprocess, "run") as run:
+            run.return_value = _fake_proc("")
+            assert "排查" in _run_main(hook)
 
 
 def test_subprocess_failure_is_silent():
     """引擎调用失败时静默退出，不抛异常。"""
     hook = load_hook("hook_sub_fail")
-    with mock.patch.object(hook.subprocess, "run", side_effect=OSError("boom")):
-        assert hook.main() == 0
+    with tempfile.TemporaryDirectory() as tmp:
+        _isolated(hook, tmp)
+        with mock.patch.object(hook.subprocess, "run", side_effect=OSError("boom")):
+            assert hook.main() == 0
 
 
 def main() -> int:

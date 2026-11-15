@@ -260,7 +260,9 @@ def repack_asar(asar: Path, edits: dict[str, bytes]) -> None:
                 continue
             files[p] = read_node(fh, data_base, n)
     files.update(edits)
-    tmp = asar.parent / (asar.name + ".zch-repack.tmp")
+    # 临时文件名带 pid：两个插件的 hook 理论上可能并发重打包，
+    # 固定名会互相覆盖写坏文件；各自写各自的 tmp，最后 os.replace 完整胜出。
+    tmp = asar.parent / (asar.name + f".zch-repack.{os.getpid()}.tmp")
     write_asar(tmp, files, unpacked)
     os.replace(tmp, asar)
 
