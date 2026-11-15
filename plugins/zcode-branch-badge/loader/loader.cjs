@@ -29,11 +29,17 @@ const PROBE_PATH = path.join(HOME_DIR, "probe.js");
 const PROBE_OUT = path.join(HOME_DIR, "probe.out.log");
 
 /* 插件市场开关联动：ZCode 的开关不写 config，渲染侧的 market-switch-bridge
- * 模块在点击开关后把意图写进 window.__zchMarketIntent，loader 每 2s 读一次。
- * 只认真实点击，不依赖元素身份（React 重建会让「值变化」推断失效）。 */
-const MARKET_INTENT_JS = "window.__zchMarketIntent||null";
+ * 模块把每次点击意图**追加**进 window.__zchMarketIntents 队列（带递增 seq），
+ * loader 每 1s 读取并按水位排水——短时间连拨多个/同一个开关不会互相覆盖。
+ * 旧桥接只写单个槽位 window.__zchMarketIntent（会被下一次点击覆盖）：桥接已
+ * 更新但 loader 未重启的过渡窗口里，回退读旧槽位。只认真实点击，不依赖
+ * 元素身份（React 重建会让「值变化」推断失效）。 */
+const MARKET_READ_JS =
+  "(function(){return JSON.stringify({" +
+  "q:Array.isArray(window.__zchMarketIntents)?window.__zchMarketIntents:null," +
+  "s:window.__zchMarketIntent||null});})()";
 const BRIDGE_ID = "market-switch-bridge";
-const MARKET_POLL_MS = 2000; // 市场开关探测间隔（用 POLL_MS 的 tick 计数实现）
+const MARKET_POLL_MS = 1000; // 市场开关探测间隔（用 POLL_MS 的 tick 计数实现）
 
 let activated = false;
 let currentEnabled = [];
@@ -99,14 +105,36 @@ function configFingerprint() {
 }
 
 function diffMarketIntent(state, intent) {
-  /* intent 由渲染侧 market-switch-bridge 写入，带 at 时间戳；同一个点击只处理一次。
-   * 返回 { moduleId: enabled } 或 null。 */
+  /* 旧协议：intent 由旧版 market-switch-bridge 写入单个槽位，带 at 时间戳；
+   * 同一个点击只处理一次。返回 { moduleId: enabled } 或 null。 */
   if (!intent || typeof intent !== "object") return null;
   if (!intent.module || typeof intent.enabled !== "boolean") return null;
   if (!intent.at || state.at === intent.at) return null;
   state.at = intent.at;
   const changed = {};
   changed[intent.module] = intent.enabled;
+  return changed;
+}
+
+function drainMarketIntents(state, entries) {
+  /* 新协议：按 seq 水位排水意图队列——seq 大于已处理水位的条目按序合并
+   * （同模块后一次点击覆盖前一次），返回 { moduleId: enabled } 或 null。
+   * 轮询重叠会重复读到同一批条目：水位未推进时返回 null，天然幂等。 */
+  if (!Array.isArray(entries)) return null;
+  const watermark = state.seq || 0;
+  const changed = {};
+  let maxSeq = watermark;
+  for (const it of entries) {
+    if (!it || typeof it !== "object") continue;
+    if (typeof it.module !== "string" || !it.module) continue;
+    if (typeof it.enabled !== "boolean") continue;
+    const seq = Number(it.seq) || 0;
+    if (seq <= watermark) continue;
+    changed[it.module] = it.enabled;
+    if (seq > maxSeq) maxSeq = seq;
+  }
+  if (maxSeq === watermark) return null;
+  state.seq = maxSeq;
   return changed;
 }
 
@@ -274,6 +302,7 @@ function replayOnLoad(wc) {
   wc.on("dom-ready", () => {
     try {
       wc.__zchState = {}; // 新页面、新 JS world：模块都不在了，必须重注
+      wc.__zchMarketState = { seq: 0, at: 0 }; // 意图序号随页面世界一起重置
     } catch (_) {
       return;
     }
@@ -324,7 +353,8 @@ function runProbe() {
 }
 
 function pollMarketSwitches() {
-  /* 每 2s 读一次渲染侧记录的「点击意图」；有新的就写回 config 并立即应用。 */
+  /* 每 1s 读一次渲染侧的「点击意图」：新协议读意图队列（按水位排水，
+   * 连拨不丢），旧桥接只有单个槽位时回退旧协议；有新的就写回 config 并立即应用。 */
   let webContents;
   try {
     ({ webContents } = require("electron"));
@@ -340,10 +370,21 @@ function pollMarketSwitches() {
       continue;
     }
     if (type !== "window") continue;
-    const state = wc.__zchMarketState || (wc.__zchMarketState = { at: 0 });
-    wc.executeJavaScript(MARKET_INTENT_JS, true)
-      .then((intent) => {
-        const changed = diffMarketIntent(state, intent);
+    const state = wc.__zchMarketState || (wc.__zchMarketState = { seq: 0, at: 0 });
+    wc.executeJavaScript(MARKET_READ_JS, true)
+      .then((raw) => {
+        let payload = null;
+        try {
+          payload = JSON.parse(raw);
+        } catch (_) {
+          return; // 页面在导航等：下个 tick 重试
+        }
+        let changed = null;
+        if (payload && Array.isArray(payload.q)) {
+          changed = drainMarketIntents(state, payload.q);
+        } else if (payload && payload.s) {
+          changed = diffMarketIntent(state, payload.s);
+        }
         if (!changed) return;
         log("市场开关点击: " + JSON.stringify(changed));
         const applied = setEnabledInConfig(changed);
@@ -426,6 +467,7 @@ module.exports = {
   syncFromConfig,
   injectionsFor,
   diffMarketIntent,
+  drainMarketIntents,
   setEnabledInConfig,
   BRIDGE_ID,
 };

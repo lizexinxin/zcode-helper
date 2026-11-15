@@ -113,6 +113,40 @@ test("diffMarketIntent 只处理新的点击意图", () => {
   );
 });
 
+test("drainMarketIntents 排水队列：连拨多个开关全部生效，seq 水位去重", () => {
+  const state = { seq: 0, at: 0 };
+  // 同一波轮询读到两个意图：都生效（修复「快速连拨只有一个生效」）
+  assert.deepStrictEqual(
+    loader.drainMarketIntents(state, [
+      { module: "folder-full-path", enabled: true, seq: 1, at: 1 },
+      { module: "branch-badge", enabled: true, seq: 2, at: 2 },
+    ]),
+    { "folder-full-path": true, "branch-badge": true }
+  );
+  // 轮询重叠重放同一批条目：水位已推进 → null（幂等）
+  assert.strictEqual(
+    loader.drainMarketIntents(state, [
+      { module: "folder-full-path", enabled: true, seq: 1, at: 1 },
+      { module: "branch-badge", enabled: true, seq: 2, at: 2 },
+    ]),
+    null
+  );
+  // 同模块连拨两次：后者覆盖前者，只应用最终值
+  assert.deepStrictEqual(
+    loader.drainMarketIntents(state, [
+      { module: "folder-full-path", enabled: false, seq: 3, at: 3 },
+      { module: "folder-full-path", enabled: true, seq: 4, at: 4 },
+    ]),
+    { "folder-full-path": true }
+  );
+  // 非法条目跳过且不推进水位；水位之后无新意图 → null
+  assert.strictEqual(
+    loader.drainMarketIntents(state, [null, "bad", { module: "", enabled: true, seq: 9 }]),
+    null
+  );
+  assert.strictEqual(state.seq, 4, "非法条目不应推进水位");
+});
+
 test("BRIDGE_ID 与渲染模块文件名一致", () => {
   assert.strictEqual(loader.BRIDGE_ID, "market-switch-bridge");
   const file = path.join(__dirname, "..", "shared", "modules", loader.BRIDGE_ID + ".js");

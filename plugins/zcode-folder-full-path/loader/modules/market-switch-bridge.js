@@ -5,9 +5,11 @@
  * button，标记随之丢失，导致某些开关（实测 folder-full-path）的拨动永远检测
  * 不到。改为在 click 阶段记录意图：只认真实点击，不依赖元素身份。
  *
- * 协议：点击后等 React 提交（120ms）再读 aria-checked，写入
- * window.__zchMarketIntent = { module, enabled, at }；loader 轮询读取并对齐
- * config.json。dispose 时移除监听并清空意图。 */
+ * 协议：点击后等 React 提交（120ms）再读 aria-checked，把意图**追加**进
+ * window.__zchMarketIntents 队列（带递增 seq，loader 按水位排水）——短时间
+ * 连拨多个/同一个开关不会互相覆盖。同时保留写旧槽位 window.__zchMarketIntent
+ * （单意图，会被覆盖）：兼容「桥接已更新、loader 未重启」的过渡窗口。
+ * dispose 只摘监听、清旧槽位；队列保留（同页面世界的未排水意图不丢）。 */
 (function () {
   "use strict";
   var ID = "market-switch-bridge";
@@ -44,11 +46,21 @@
       if (!el.isConnected) return;
       var checked = el.getAttribute("aria-checked");
       if (checked !== "true" && checked !== "false") return;
-      window.__zchMarketIntent = {
+      window.__zchMarketSeq = (window.__zchMarketSeq || 0) + 1;
+      var intent = {
         module: mod,
         enabled: checked === "true",
+        seq: window.__zchMarketSeq,
         at: Date.now(),
       };
+      // 队列：loader 按水位逐条排水，连拨不丢；封顶 50 条防止页面长期开着涨内存
+      if (!Array.isArray(window.__zchMarketIntents)) window.__zchMarketIntents = [];
+      window.__zchMarketIntents.push(intent);
+      if (window.__zchMarketIntents.length > 50) {
+        window.__zchMarketIntents.splice(0, window.__zchMarketIntents.length - 50);
+      }
+      // 旧槽位：兼容「新桥接 + 旧 loader」过渡窗口（插件已更新、ZCode 未重启）
+      window.__zchMarketIntent = intent;
     }, COMMIT_DELAY_MS);
   }
 
@@ -71,6 +83,7 @@
         document.removeEventListener("click", onClick, true);
         onClick = null;
       }
+      // 只清旧槽位；队列保留——同页面世界的未排水意图不因重注入丢失
       window.__zchMarketIntent = null;
       return "ok";
     },

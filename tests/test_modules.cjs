@@ -245,6 +245,7 @@ test("market-switch-bridge 记录点击意图（target 是内部子元素也能�
   let intent = dom.window.__zchMarketIntent;
   assert.strictEqual(intent.module, "folder-full-path");
   assert.strictEqual(intent.enabled, false);
+  assert.strictEqual(dom.window.__zchMarketIntents.length, 1, "意图应进入队列");
 
   // 另一个开关也能记录，且时间戳更新
   const firstAt = intent.at;
@@ -256,12 +257,52 @@ test("market-switch-bridge 记录点击意图（target 是内部子元素也能�
   assert.strictEqual(intent.enabled, false);
   assert.ok(intent.at >= firstAt);
 
-  // dispose 后不再记录
+  // 队列保留全部历史意图（旧单槽会被第二次点击覆盖——这正是要修的丢失问题）
+  const queue = dom.window.__zchMarketIntents;
+  assert.strictEqual(queue.length, 2);
+  assert.strictEqual(queue[0].module, "folder-full-path");
+  assert.strictEqual(queue[1].module, "branch-badge");
+  assert.ok(queue[1].seq > queue[0].seq, "seq 单调递增");
+
+  // dispose 后不再记录；队列保留（未排水意图不因重注入丢失）
   bridge.dispose();
   folder.button.setAttribute("aria-checked", "true");
   dom.dispatchClick(folder.button);
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.strictEqual(dom.window.__zchMarketIntent, null);
+  assert.strictEqual(dom.window.__zchMarketIntents.length, 2);
+});
+
+test("market-switch-bridge 快速连拨两个开关：队列不丢任何意图", async () => {
+  const dom = makeDom();
+  const makeSwitch = (label) => {
+    const button = dom.document.createElement("button");
+    button.setAttribute("data-testid", "plugin-store-enabled-switch");
+    button.setAttribute("aria-label", label);
+    button.setAttribute("aria-checked", "true");
+    dom.mount(button);
+    return button;
+  };
+  const folder = makeSwitch("停用 ZCode 源文件夹完整路径");
+  const badge = makeSwitch("停用 ZCode git 分支徽章");
+
+  const bridge = runModuleIn(dom, "market-switch-bridge");
+  assert.strictEqual(bridge.install(), "ok");
+
+  // 两个开关在同一轮询间隔内连拨（不等待）：两次意图都必须落进队列
+  folder.setAttribute("aria-checked", "false");
+  badge.setAttribute("aria-checked", "false");
+  dom.dispatchClick(folder);
+  dom.dispatchClick(badge);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+
+  const queue = dom.window.__zchMarketIntents;
+  assert.strictEqual(queue.length, 2, "连拨的两个意图都不能被覆盖丢失");
+  assert.strictEqual(queue[0].module, "folder-full-path");
+  assert.strictEqual(queue[1].module, "branch-badge");
+  assert.strictEqual(queue[0].enabled, false);
+  assert.strictEqual(queue[1].enabled, false);
+  assert.ok(queue[1].seq > queue[0].seq);
 });
 
 test("branch-badge dispose 移除徽章并断开 observer", async () => {
