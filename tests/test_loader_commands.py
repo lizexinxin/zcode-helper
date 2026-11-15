@@ -10,6 +10,8 @@
 - ZCODE_LOADER_ASSETS → 临时资产源目录（正常为插件目录 loader/）
 """
 
+from __future__ import annotations
+
 import importlib.util
 import json
 import os
@@ -148,6 +150,8 @@ def test_status_reports_installed_and_modules():
         assert payload["installed"] is True
         assert payload["loaderFile"] is True
         assert payload["modules"] == ["folder-full-path.js"]
+        # 测试环境没有运行中的 loader（临时 LOADER_HOME 无 active.json）
+        assert payload["loaderActive"] is False
 
 
 def test_toggle_writes_enabled_plugins():

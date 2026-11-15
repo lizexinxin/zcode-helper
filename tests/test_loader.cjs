@@ -174,3 +174,13 @@ test("syncFromConfig 在配置缺失时不抛错", () => {
   fs.rmSync(tmpConfig, { force: true });
   assert.deepStrictEqual(loader.syncFromConfig("test"), []);
 });
+
+test("activate 写入 active.json 激活凭证，重复激活返回 already", () => {
+  assert.strictEqual(loader.activate(), "ok");
+  const active = JSON.parse(fs.readFileSync(path.join(tmpHome, "active.json"), "utf8"));
+  assert.strictEqual(typeof active.pid, "number");
+  assert.ok(active.pid > 0);
+  assert.match(active.activatedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.strictEqual(active.version, 1);
+  assert.strictEqual(loader.activate(), "already");
+});

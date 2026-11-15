@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SessionStart hook 测试（仅依赖标准库）。
+"""SessionStart / UserPromptSubmit hook 测试（仅依赖标准库）。
 
 运行：python3 tests/test_session_hook.py
 """
 
 import importlib.util
 import io
+import json
+import os
+import subprocess
 import sys
 import tempfile
 import traceback
@@ -22,6 +25,26 @@ def load_hook(name: str):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _dead_pid() -> int:
+    """拿一个确定已退出的进程 pid（启动即退出），避免猜测不存在的 pid。"""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+def _active_file(tmp: str, pid: int) -> Path:
+    path = Path(tmp) / "active.json"
+    path.write_text(json.dumps({"pid": pid, "activatedAt": "2026-01-01T00:00:00Z"}), encoding="utf-8")
+    return path
+
+
+def _run_main(hook) -> str:
+    buf = io.StringIO()
+    with mock.patch("sys.stdout", buf):
+        assert hook.main() == 0
+    return buf.getvalue()
 
 
 def test_missing_tool_is_silent():
@@ -42,6 +65,15 @@ def test_auto_apply_disabled_reads_config():
         assert hook.auto_apply_enabled() is True
         hook.CONFIG.write_text('{"autoApply": false}', encoding="utf-8")
         assert hook.auto_apply_enabled() is False
+
+
+def test_notify_disabled_reads_config():
+    hook = load_hook("hook_notify")
+    with tempfile.TemporaryDirectory() as tmp:
+        hook.CONFIG = Path(tmp) / "config.json"
+        assert hook.notify_enabled() is True
+        hook.CONFIG.write_text('{"notify": false}', encoding="utf-8")
+        assert hook.notify_enabled() is False
 
 
 def test_daemon_start_only_when_script_present():
@@ -76,15 +108,24 @@ def _fake_proc(stdout: str):
 
 
 def test_main_calls_loader_install():
-    """autoApply 开启时，main 应调用引擎的 loader install --quiet（幂等）。"""
+    """autoApply 开启时，main 应调用引擎的 loader install --quiet（幂等）。
+
+    hook 对「already + 未激活」还会调 osascript 发系统通知——同一个
+    subprocess.run mock 会被一并拦截，所以只统计引擎调用本身。
+    """
     hook = load_hook("hook_loader_install")
-    with mock.patch.object(hook.subprocess, "run") as run:
-        run.return_value = _fake_proc('{"action": "already"}')
-        with mock.patch("sys.stdout"):
-            hook.main()
-        assert run.call_count == 1
-        argv = run.call_args[0][0]
-        assert "loader" in argv and "install" in argv and "--quiet" in argv
+    with tempfile.TemporaryDirectory() as tmp:
+        hook.ACTIVE_FILE = Path(tmp) / "missing.json"  # 未激活 → 走提醒分支
+        with mock.patch.object(hook.subprocess, "run") as run:
+            run.return_value = _fake_proc('{"action": "already"}')
+            with mock.patch("sys.stdout"):
+                hook.main()
+            engine_calls = [
+                c for c in run.call_args_list
+                if "loader" in c.args[0] and "install" in c.args[0]
+            ]
+            assert len(engine_calls) == 1, repr(run.call_args_list)
+            assert "--quiet" in engine_calls[0].args[0], repr(engine_calls[0].args[0])
 
 
 def test_installed_prints_restart_hint():
@@ -92,21 +133,67 @@ def test_installed_prints_restart_hint():
     hook = load_hook("hook_installed_hint")
     with mock.patch.object(hook.subprocess, "run") as run:
         run.return_value = _fake_proc('{"action": "installed", "synced": ["loader.cjs"]}')
-        buf = io.StringIO()
-        with mock.patch("sys.stdout", buf):
-            assert hook.main() == 0
-        assert "重新打开" in buf.getvalue()
+        assert "重新打开" in _run_main(hook)
 
 
-def test_already_installed_is_silent():
-    """loader 已在位时无输出（不刷会话上下文）。"""
-    hook = load_hook("hook_already_silent")
+def test_installed_also_notifies():
+    """首装时发 macOS 系统通知（osascript，随 subprocess mock 一并验证）。"""
+    hook = load_hook("hook_installed_notify")
+    with tempfile.TemporaryDirectory() as tmp:
+        hook.CONFIG = Path(tmp) / "config.json"  # 不存在 → notify 默认开
+        with mock.patch.object(hook.subprocess, "run") as run:
+            run.return_value = _fake_proc('{"action": "installed"}')
+            with mock.patch.object(hook.platform, "system", return_value="Darwin"):
+                hook.notify("测试消息")
+            argv = run.call_args[0][0]
+            assert argv[0] == "osascript" and "测试消息" in argv[2]
+
+
+def test_already_with_active_loader_is_silent():
+    """指针已在位且 loader 激活（active.json 的 pid 活着）时零输出。"""
+    hook = load_hook("hook_already_active")
+    with tempfile.TemporaryDirectory() as tmp:
+        hook.ACTIVE_FILE = _active_file(tmp, os.getpid())
+        with mock.patch.object(hook.subprocess, "run") as run:
+            run.return_value = _fake_proc('{"action": "already"}')
+            assert _run_main(hook) == ""
+
+
+def test_already_without_active_loader_prompts_restart():
+    """指针已在位但 loader 从未激活（无 active.json）→ 提示重启一次。"""
+    hook = load_hook("hook_already_stale")
+    with tempfile.TemporaryDirectory() as tmp:
+        hook.ACTIVE_FILE = Path(tmp) / "missing.json"  # 不存在 → 未激活
+        with mock.patch.object(hook.subprocess, "run") as run:
+            run.return_value = _fake_proc('{"action": "already"}')
+            assert "重新打开" in _run_main(hook)
+
+
+def test_already_with_dead_pid_prompts_restart():
+    """active.json 里的 pid 已退出（ZCode 没重启成功/装完没重启）→ 提示重启。"""
+    hook = load_hook("hook_already_dead")
+    with tempfile.TemporaryDirectory() as tmp:
+        hook.ACTIVE_FILE = _active_file(tmp, _dead_pid())
+        with mock.patch.object(hook.subprocess, "run") as run:
+            run.return_value = _fake_proc('{"action": "already"}')
+            assert "重新打开" in _run_main(hook)
+
+
+def test_error_action_prints_reason():
+    """安装失败（如 not_writable）时输出一行简短原因，不再静默。"""
+    hook = load_hook("hook_error_reason")
     with mock.patch.object(hook.subprocess, "run") as run:
-        run.return_value = _fake_proc('{"action": "already"}')
-        buf = io.StringIO()
-        with mock.patch("sys.stdout", buf):
-            assert hook.main() == 0
-        assert buf.getvalue() == ""
+        run.return_value = _fake_proc('{"action": "error", "reason": "not_writable"}')
+        output = _run_main(hook)
+        assert "失败" in output and "不可写" in output
+
+
+def test_no_payload_prints_hint():
+    """引擎无 JSON 输出（超时/异常）时输出排查提示。"""
+    hook = load_hook("hook_no_payload")
+    with mock.patch.object(hook.subprocess, "run") as run:
+        run.return_value = _fake_proc("")
+        assert "排查" in _run_main(hook)
 
 
 def test_subprocess_failure_is_silent():

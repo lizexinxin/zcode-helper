@@ -16,6 +16,7 @@ const MODULES_DIR = path.join(HOME_DIR, "modules");
 const CONFIG_PATH =
   process.env.ZCODE_LOADER_CONFIG || path.join(os.homedir(), ".zcode", "cli", "config.json");
 const LOG_PATH = path.join(HOME_DIR, "loader.log");
+const ACTIVE_PATH = path.join(HOME_DIR, "active.json");
 
 const MODULE_IDS = ["folder-full-path", "branch-badge"];
 const PLUGIN_PREFIX = "zcode-";
@@ -45,6 +46,21 @@ function log(msg) {
     fs.mkdirSync(HOME_DIR, { recursive: true });
     fs.appendFileSync(LOG_PATH, new Date().toISOString() + " " + msg + "\n");
   } catch (_) { /* 日志失败忽略 */ }
+}
+
+function writeActive() {
+  /* 激活凭证：hook 读 pid 判活，用来区分「指针已装但 ZCode 未重启」与「已生效」。 */
+  try {
+    fs.mkdirSync(HOME_DIR, { recursive: true });
+    const tmp = ACTIVE_PATH + ".tmp";
+    fs.writeFileSync(
+      tmp,
+      JSON.stringify({ pid: process.pid, activatedAt: new Date().toISOString(), version: 1 })
+    );
+    fs.renameSync(tmp, ACTIVE_PATH); // 原子替换，避免 hook 读到半截 JSON
+  } catch (exc) {
+    log("写 active.json 失败: " + (exc && exc.message));
+  }
 }
 
 function enabledModules(configData) {
@@ -374,6 +390,7 @@ function watchConfig() {
 function activate() {
   if (activated) return "already";
   activated = true;
+  writeActive();
   currentEnabled = readEnabled() || [];
   lastConfigFingerprint = configFingerprint();
   log("激活，已启用模块: " + JSON.stringify(currentEnabled));

@@ -19,12 +19,13 @@ import os
 import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 DEFAULT_PORTS = list(range(39217, 39222))
 
 
-def query_branch(path: str) -> str | None:
+def query_branch(path: str) -> Optional[str]:
     """返回分支名 / detached 短 SHA（HEAD@xxx）/ None（非目录或非 git 仓库）。"""
     if not path or not os.path.isabs(path) or not os.path.isdir(path):
         return None

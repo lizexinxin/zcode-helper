@@ -885,6 +885,30 @@ def loader_import_line() -> str:
     )
 
 
+def loader_active() -> bool:
+    """active.json 存在且 pid 活着 → loader 已在运行中的 ZCode 主进程生效。
+
+    与 hook（session-start.py）的判活逻辑一致：loader activate() 时原子写
+    {pid, activatedAt, version}，ZCode 重启后 pid 随新进程刷新。
+    """
+    try:
+        data = json.loads((LOADER_HOME / "active.json").read_text(encoding="utf-8"))
+        pid = int(data.get("pid", 0))
+    except (OSError, ValueError, TypeError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # 进程存在但无权发信号 → 视为活着
+    except OSError:
+        return False
+    return True
+
+
 def sync_loader_assets() -> list[str]:
     """把 loader 资产（loader.cjs + modules/*.js）拷到 LOADER_HOME。"""
     copied: list[str] = []
@@ -998,6 +1022,7 @@ def cmd_loader(args) -> int:
             result = {
                 "installed": LOADER_IMPORT_MARK.encode() in index,
                 "loaderFile": (LOADER_HOME / "loader.cjs").is_file(),
+                "loaderActive": loader_active(),
                 "modules": sorted(p.name for p in modules_dir.glob("*.js")) if modules_dir.is_dir() else [],
             }
     except (OSError, AsarError) as exc:
@@ -1012,7 +1037,8 @@ def cmd_loader(args) -> int:
         print("✓ loader 指针已剥离。请完全退出 ZCode 后重新打开。")
     elif action == "status" and not args.json:
         state = "已安装" if result["installed"] else "未安装"
-        print(f"loader   {state}   loader 文件：{'在位' if result['loaderFile'] else '缺失'}"
+        active = "已激活" if result.get("loaderActive") else "未激活"
+        print(f"loader   {state}({active})   loader 文件：{'在位' if result['loaderFile'] else '缺失'}"
               f"   模块：{', '.join(result['modules']) or '无'}")
 
     if args.json:

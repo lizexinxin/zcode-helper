@@ -1,90 +1,76 @@
 ---
 name: zcode-folder-full-path
-description: ZCode 桌面客户端「源文件夹完整路径」补丁。用户想编辑项目时看到源文件夹完整路径、询问“为什么文件夹只显示名字”“同名文件夹分不清”，或想查看/还原该补丁时使用。通过等长原地替换 app.asar 内的界面代码实现，可精确还原。
+description: ZCode 桌面客户端「源文件夹完整路径」。用户想编辑项目时看到源文件夹完整路径、询问"为什么文件夹只显示名字""同名文件夹分不清"、询问插件装上后为什么不生效/还要做什么，或想查看状态/卸载注入时使用。
 ---
 
 # ZCode Folder Full Path
 
-ZCode 的「编辑项目 → 源文件夹」列表原本只显示文件夹名（basename），hover 才能看到完整路径。
-本插件把显示改为完整路径并允许换行。原理：解析 `app.asar` 头部，按补丁定义定位目标 JS
-文件，对其中一小段字节做**等长原地替换**（不足部分补空格），不改变 asar 结构、大小和
-文件偏移。原始字节记录在 `~/.zcode/zcode-folder-full-path/state.json`，可随时精确还原。
+ZCode 的「编辑项目 → 源文件夹」列表原本只显示文件夹名（basename），hover 才能看到完整
+路径。本插件把显示改为完整路径并允许换行。
 
-## 何时使用
+原理：主进程 loader + 运行时注入。SessionStart / UserPromptSubmit hook 自动执行
+`loader install`（幂等）：首次安装往 `app.asar` 的主进程入口写入一行 dynamic `import()`
+指针（整包重打包，约 307MB），指向磁盘上的 `~/.zcode/zcode-helper/loader.cjs`；loader
+常驻主进程，监听 `~/.zcode/cli/config.json` 的 `enabledPlugins`，用
+`webContents.executeJavaScript` 注入/拆除渲染模块。**不修改任何压缩 JS**。
 
-- 用户说「编辑项目时文件夹只显示名字 / 同名文件夹分不清 / 想看全路径」→ 应用本补丁。
-- 用户问补丁是否生效、ZCode 升级后补丁失效 → 查看状态并按需重新应用。
-- 用户想还原客户端原始界面 → 运行还原。
+## 装上即生效
+
+1. 安装并启用插件后，在任意会话里发一条消息（UserPromptSubmit hook）或开新会话
+   （SessionStart hook）→ 自动安装 loader 并给出提示（含 macOS 系统通知）。
+2. **完全退出 ZCode**（菜单 → 退出，关闭窗口不算）再重新打开一次——这是唯一一次手动
+   步骤，也是最后一次因本插件重启。
+3. 之后一切变更（开关拨动、模块更新）即时生效、零重启。
+
+## 何时使用本 skill
+
+- 用户问「装了为什么不生效」「还要做什么」→ 运行 `loader status` 并按状态解读处理。
+- 用户想卸载注入、还原原版界面 → `loader remove`。
+- ZCode 升级后注入丢失 → hook 会自动重装指针，重启一次即可恢复。
 
 ## 命令
 
-脚本位置：`${ZCODE_PLUGIN_ROOT}/scripts/zcode_helper.py`（插件根目录由
-`ZCODE_PLUGIN_ROOT` 环境变量提供；若为空，用 `find ~/.zcode -path '*zcode-folder-full-path*/scripts/zcode_helper.py'` 定位）。
+脚本位置：`${ZCODE_PLUGIN_ROOT}/scripts/zcode_helper.py`（若环境变量为空，用
+`find ~/.zcode/cli/plugins -path '*zcode-folder-full-path*/scripts/zcode_helper.py' -print -quit` 定位）。
 
 ```bash
-python3 "${ZCODE_PLUGIN_ROOT}/scripts/zcode_helper.py" status
-python3 "${ZCODE_PLUGIN_ROOT}/scripts/zcode_helper.py" apply
-python3 "${ZCODE_PLUGIN_ROOT}/scripts/zcode_helper.py" restore
-python3 "${ZCODE_PLUGIN_ROOT}/scripts/zcode_helper.py" doctor
-python3 "${ZCODE_PLUGIN_ROOT}/scripts/zcode_helper.py" list
+python3 "${ZCODE_PLUGIN_ROOT}/scripts/zcode_helper.py" loader install   # 幂等安装指针
+python3 "${ZCODE_PLUGIN_ROOT}/scripts/zcode_helper.py" loader status    # 安装/激活/模块状态
+python3 "${ZCODE_PLUGIN_ROOT}/scripts/zcode_helper.py" loader remove    # 剥离指针还原原版
+python3 "${ZCODE_PLUGIN_ROOT}/scripts/zcode_helper.py" loader toggle folder-full-path <on|off|toggle>
+python3 "${ZCODE_PLUGIN_ROOT}/scripts/zcode_helper.py" doctor           # 诊断 asar
 ```
 
-全局参数 `--asar PATH` 可指向非默认安装位置；`--data-dir PATH` 覆盖数据目录；`--json` 输出机器可读结果。
+全局参数 `--asar PATH` 可指向非默认安装位置；`--json` 输出机器可读结果。
 
-## 已内置补丁
+对应 slash 命令：`/folder-full-path-apply`、`/folder-full-path-status`、
+`/folder-full-path-restore`、`/folder-full-path-toggle`。
 
-| ID | 作用 | 验证版本 |
-|---|---|---|
-| `folder-full-path` | 「编辑项目 → 源文件夹」列表直接显示完整路径（允许换行） | ZCode 3.16.3、3.17.1 |
+## 状态解读（loader status）
+
+- `已安装(已激活)`：指针在位且 loader 活着（active.json 的 pid 判活），界面应当已生效。
+- `已安装(未激活)`：指针已写但 ZCode 还没重启 → 让用户完全退出并重开一次。
+- `未安装`：运行 `loader install`；hook 也会在下次触发时自动安装。
+- `loader 文件 缺失`：运行 `loader install` 同步资产到 `~/.zcode/zcode-helper/`。
 
 ## 工作原理与安全边界
 
-1. 只修改补丁定义中精确匹配的字节；匹配次数不符合预期时**不做任何修改**并报错。
-2. 替换后长度不变（新内容不足时补空格），因此 asar header、文件 offset、总大小都不变。
-3. `state.json` 保存每处修改的偏移和原始字节，还原时先校验当前位置内容确实是补丁后的内容，否则跳过。
-4. 补丁只改界面显示，不涉及凭据、网络和用户数据。
+1. asar 里只写一行指针；`loader remove` 对称剥离还原原版。
+2. 渲染模块每次注入都从磁盘现读（`~/.zcode/zcode-helper/modules/*.js`）：改模块代码，
+   下次注入即用新版，零重启。
+3. 注入只做界面显示，不读取文件、不发出外部网络请求。
 
-## 生效条件
+## 配置开关（~/.zcode/zcode-folder-full-path/config.json）
 
-修改的是磁盘上的 asar；**已经运行的 ZCode 进程仍使用内存里的旧代码**。
-必须完全退出 ZCode（菜单 → 退出，关闭窗口不算）再重新打开，补丁才可见。
-
-## ZCode 升级后
-
-SessionStart hook 会在新会话启动时调用 `auto`：补丁之前应用过、当前又变回未应用状态时
-自动重新应用（默认开启，可在 `~/.zcode/zcode-folder-full-path/config.json` 中设置
-`{"autoApply": false}` 关闭）。`find` 里用 `{{ident}}` 通配压缩变量名，改名类变化不受影响；
-只有目标代码本身变了才需要手工更新 `find`。
-
-## 新增补丁
-
-在 `patches/` 下新增一个 JSON 文件即可，无需改脚本：
-
-```json
-{
-  "id": "my-patch",
-  "title": "补丁名称",
-  "version": 1,
-  "description": "作用说明",
-  "locate": {
-    "pathPrefix": "out/renderer/assets/",
-    "pathSuffix": ".js",
-    "minSize": 1000000,
-    "contains": ["用于定位目标文件的唯一字符串"]
-  },
-  "replacements": [
-    { "find": "要被替换的原始代码片段", "replace": "替换后的代码片段（不能比 find 长）", "expectedCount": 1 }
-  ]
-}
-```
-
-- `find` 里出现的压缩变量名用 `{{ident}}` 代替（匹配任意 JS 标识符），避免升级后失效。
-- `replace` 里可用 `{{data_dir}}` 指代本插件数据目录 `~/.zcode/zcode-folder-full-path/`（只对 replace 生效，find 不展开）。
-- 修改 `find`/`replace` 时保证替换后 JS 语法合法；应用前可用 `node --check <提取出来的文件>` 验证。
+- `{"autoApply": false}`：关闭 hook 自动安装（默认开启）。
+- `{"notify": false}`：关闭「请重启 ZCode」的 macOS 系统通知（默认开启）。
 
 ## 故障排查
 
-- **没有写入权限**：把 ZCode 复制到 `~/Applications` 后用 `--asar` 指向，或用 sudo 运行。
-- **目标文件/代码未找到**：ZCode 升级后 bundle 内容变化，运行 `doctor` 查看定位结果，更新 `patches/*.json`。
-- **已应用但界面没变**：没有完全退出 ZCode；确认从菜单退出后重新打开。
-- **想彻底移除**：`restore` 后在 **设置 → 插件** 里禁用或卸载本插件。
+- **界面没变化**：① `loader status` 是否「已安装(已激活)」；② 未激活 → 完全重启 ZCode
+  （菜单 → 退出，关闭窗口不算）；③ 已激活仍不生效 → 看
+  `~/.zcode/zcode-helper/loader.log` 的「注入」行。
+- **hook 提示安装失败 / 没有写入权限**：把 ZCode 复制到 `~/Applications` 后用 `--asar`
+  指向，或用 sudo 运行 `loader install`（不要让会话里的助手自行 sudo）。
+- **ZCode 升级后失效**：升级会替换整个 .app；下次会话 hook 自动重装指针，重启一次恢复。
+- **想彻底移除**：`loader remove` + 重启 ZCode，再在 设置 → 插件 里禁用或卸载本插件。

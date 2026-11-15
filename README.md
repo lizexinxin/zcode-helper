@@ -67,20 +67,26 @@ ZCode 会在仓库根目录找到 `marketplace.json`，市场名称为 `zcode-he
 
 ![开启两个插件](docs/images/plugins-enabled.png)
 
-### 3. 首次安装 loader（一次性，之后零重启）
+### 3. 装上即生效（唯一一次手动步骤：重启一次）
 
-新开一个会话，SessionStart hook 会自动执行 `loader install`（幂等）：
-同步 loader 资产到 `~/.zcode/zcode-helper/`，并整包重打包 app.asar
-写入一行 `import()` 指针。
+安装并启用插件后，hook 会自动完成剩下的所有事情——**在任意会话里发一条消息**
+（UserPromptSubmit hook）**或开一个新会话**（SessionStart hook）：
 
-也可以手动执行：
+- 自动执行 `loader install`（幂等）：同步 loader 资产到 `~/.zcode/zcode-helper/`，
+  并整包重打包 app.asar 写入一行 `import()` 指针（首装约数十秒）；
+- 自动拉起本地分支服务（仅 branch-badge 插件携带）；
+- 会话里出现提示 + macOS 系统通知：**完全退出 ZCode**（菜单 → 退出，关闭窗口不算），
+  再重新打开一次。
+
+这是最后一次因为装插件而重启——之后一切改动都即时生效。也可以手动执行：
 
 ```bash
 python3 plugins/zcode-folder-full-path/scripts/zcode_helper.py loader install
 ```
 
-**完全退出 ZCode**（菜单 → 退出，关闭窗口不算），再重新打开一次。
-这是最后一次因为装插件而重启——之后一切改动都即时生效。
+需要重启的提醒会一直出现（hook 每次触发检查 `active.json` 的 pid），直到重启生效为止；
+也可以在 `~/.zcode/<插件名>/config.json` 里配置 `{"autoApply": false}` 关闭自动安装、
+`{"notify": false}` 关闭系统通知。
 
 ## 开关即插即用
 
@@ -114,12 +120,17 @@ ZCode 的插件机制没有任何 UI 扩展点，界面代码打包在
 本仓库采用**主进程 loader + 运行时注入**架构：
 
 ```
-app.asar 的 out/main/index.js 尾部只有一行 dynamic import() 指针
-  → 指向磁盘上的 ~/.zcode/zcode-helper/loader.cjs（常驻主进程）
-      ├─ fs.watch ~/.zcode/cli/config.json 的 enabledPlugins（插件开关实时落盘处）
-      ├─ 开关变化 → webContents.executeJavaScript 注入/拆除模块（DOM 立即变化）
-      └─ 新窗口 / 页面刷新 → 自动重放已启用模块（模块幂等）
+SessionStart / UserPromptSubmit hook（装上即自动安装）
+  → app.asar 的 out/main/index.js 尾部只有一行 dynamic import() 指针
+      → 指向磁盘上的 ~/.zcode/zcode-helper/loader.cjs（常驻主进程）
+          ├─ fs.watch ~/.zcode/cli/config.json 的 enabledPlugins（插件开关实时落盘处）
+          ├─ 开关变化 → webContents.executeJavaScript 注入/拆除模块（DOM 立即变化）
+          └─ 新窗口 / 页面刷新 → 自动重放已启用模块（模块幂等）
 ```
+
+loader 激活时原子写 `~/.zcode/zcode-helper/active.json`（pid + 时间戳）：
+hook 用它判活，把「指针已装但 ZCode 未重启」和「已生效」区分开——前者持续提醒重启，
+后者完全静默（`loader status` 的 `已安装(已激活/未激活)` 也来自这里）。
 
 - **渲染模块**（`~/.zcode/zcode-helper/modules/*.js`）每次注入都从磁盘现读：
   改模块代码，下次开关切换或页面刷新即用新版，零重启、不碰 asar。
@@ -138,9 +149,10 @@ app.asar 的 out/main/index.js 尾部只有一行 dynamic import() 指针
 
 ### ZCode 升级后
 
-ZCode 自动更新会替换整个 `.app`，asar 指针丢失。各插件的 `SessionStart` hook
-会在新会话启动时自动重装（默认开启，可在 `~/.zcode/<插件名>/config.json` 里设置
-`{"autoApply": false}` 关闭），重装后重启一次 ZCode 即恢复；渲染模块不受升级影响。
+ZCode 自动更新会替换整个 `.app`，asar 指针丢失。各插件的 `SessionStart` /
+`UserPromptSubmit` hook 会在下次触发时自动重装（默认开启，可在
+`~/.zcode/<插件名>/config.json` 里设置 `{"autoApply": false}` 关闭），
+重装后重启一次 ZCode 即恢复；渲染模块不受升级影响。
 
 ## 修改引擎与模块（shared/ 真源与副本）
 
@@ -167,7 +179,8 @@ python3 tests/test_asar_repack.py      # asar 重打包核心（含真实 asar �
 python3 tests/test_loader_commands.py  # loader install/remove/status（合成 asar）
 python3 tests/test_patch_engine.py     # 引擎既有能力（{{ident}}/{{data_dir}} 等，合成 asar）
 python3 tests/test_branch_daemon.py    # 本地分支服务（真实起服务、查临时 git 仓库）
-python3 tests/test_session_hook.py     # SessionStart hook
+python3 tests/test_session_hook.py     # SessionStart/UserPromptSubmit hook
+python3 tests/test_py_compat.py        # 全部 Python 脚本 3.9 语法兼容把关
 python3 tests/test_engine_sync.py      # shared/ 与副本同步
 node --test tests/test_loader.cjs      # loader 纯逻辑
 node --test tests/test_modules.cjs     # 渲染模块协议与幂等（DOM stub）
@@ -191,7 +204,7 @@ node --test tests/test_modules.cjs     # 渲染模块协议与幂等（DOM stub�
 marketplace.json                     # 插件市场清单（仓库根，ZCode 添加 git 市场时在此查找）
 shared/
   zcode_helper.py                    # 引擎真源（asar 解析/重打包 + loader 命令 + daemon）
-  session-start.py                   # SessionStart hook 真源（自动安装 loader）
+  session-start.py                   # SessionStart/UserPromptSubmit hook 真源（自动安装 loader + 重启提醒）
   loader.cjs                         # 主进程 loader 真源
   modules/                           # 渲染模块真源
     folder-full-path.js              #   完整路径（纯 CSS）
@@ -218,6 +231,7 @@ tests/
   test_patch_engine.py              # 引擎既有能力测试
   test_branch_daemon.py             # 分支服务测试
   test_session_hook.py              # hook 测试
+  test_py_compat.py                 # Python 3.9 语法兼容把关
   test_engine_sync.py               # shared/ 与副本同步校验
   test_loader.cjs  test_modules.cjs # loader / 模块 node 测试
 ```
