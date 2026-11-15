@@ -9,6 +9,10 @@
   already + 未激活     → 提示「上次已自动安装，请重启一次」+ 系统通知；
   already + 已激活     → 完全静默（常态路径）；
   失败 / 无输出        → 一行简短原因，便于会话里的助手接手排查。
+- 重启提醒（前两路）共用 10 分钟冷却（restart-reminder.json 记上次提醒时刻）：
+  SessionStart 与 UserPromptSubmit 会先后各触发一次安装，第一次「已自动安装」
+  提醒后，随后几秒的「待生效」检查直接静默，避免两条通知连发；冷却过后
+  （如几小时后仍没重启）恢复提醒，不丢失持续提醒能力。
 - 两个插件各挂一套 hook，同一波触发会并发跑到这里：用 install.lock 的非阻塞
   flock 串行化——没抢到锁的直接静默退出，由抢到的那个负责安装和输出，
   避免同波「已自动安装 + 待生效」双提示、也杜绝并发重打包。
@@ -27,6 +31,7 @@ import os
 import platform
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -37,6 +42,8 @@ LOADER_HOME = Path(
 )
 ACTIVE_FILE = LOADER_HOME / "active.json"
 INSTALL_LOCK = LOADER_HOME / "install.lock"
+REMINDER_FILE = LOADER_HOME / "restart-reminder.json"
+REMINDER_COOLDOWN_SEC = 600  # 冷却只需盖住同一轮使用里的接连触发（首装 → 发首条消息）
 
 
 def _plugin_name(root: Path) -> str:
@@ -100,6 +107,41 @@ def loader_active() -> bool:
     except OSError:
         return False
     return True
+
+
+def reminder_recent() -> bool:
+    """冷却期内已提醒过重启 → True（本次不再提醒，避免接连触发重复轰炸）。"""
+    try:
+        data = json.loads(REMINDER_FILE.read_text(encoding="utf-8"))
+        ts = float(data.get("ts", 0))
+    except (OSError, ValueError, TypeError):
+        return False
+    return (time.time() - ts) < REMINDER_COOLDOWN_SEC
+
+
+def mark_reminded() -> None:
+    """记录「刚提醒过重启」的时刻；写不进去只影响去重，不影响功能。"""
+    try:
+        REMINDER_FILE.parent.mkdir(parents=True, exist_ok=True)
+        REMINDER_FILE.write_text(
+            json.dumps({"ts": time.time()}), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+def remind_restart(hint: str, message: str) -> None:
+    """输出重启提示 + 系统通知；冷却期内只提醒一次。
+
+    首装后的 SessionStart 与紧接着的 UserPromptSubmit 会先后各触发一次安装：
+    第一路（installed 或 already+未激活）提醒并记时刻，随后几秒的另一路
+    检查到冷却期直接静默——用户只会看到一条「请重启」。
+    """
+    if reminder_recent():
+        return
+    mark_reminded()
+    print(hint)
+    notify(message)
 
 
 def ensure_daemon() -> None:
@@ -180,19 +222,19 @@ def _install_loader_once() -> None:
         return
     action = payload.get("action")
     if action == "installed":
-        print(
+        remind_restart(
             f"[{PLUGIN_NAME}] 已自动安装 UI 注入 loader（app.asar 已重打包）。"
-            "请完全退出 ZCode 后重新打开一次，此后插件开关即时生效、无需重启。"
+            "请完全退出 ZCode 后重新打开一次，此后插件开关即时生效、无需重启。",
+            "UI 增强已自动安装，请重启 ZCode 一次生效",
         )
-        notify("UI 增强已自动安装，请重启 ZCode 一次生效")
     elif action == "already":
         if loader_active():
             return  # 已生效：常态，零输出
-        print(
+        remind_restart(
             f"[{PLUGIN_NAME}] 上次已自动安装 UI 注入 loader，但尚未生效——"
-            "请完全退出 ZCode（菜单 → 退出，关闭窗口不算）后重新打开一次。"
+            "请完全退出 ZCode（菜单 → 退出，关闭窗口不算）后重新打开一次。",
+            "UI 增强待生效，请完全退出并重开 ZCode",
         )
-        notify("UI 增强待生效，请完全退出并重开 ZCode")
     else:
         reasons = {
             "not_writable": "app.asar 不可写（可 sudo 运行，或将 ZCode 装到用户目录后用 --asar 指向）",

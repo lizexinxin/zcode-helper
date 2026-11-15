@@ -1,5 +1,5 @@
 {
-  "description": "zcode-folder-full-path: 会话启动与用户提交消息时自动确保 ZCode UI 注入 loader 在位（幂等，装上即生效）。首装或 ZCode 升级覆盖 asar 后自动重装指针并提示重启一次（可在 ~/.zcode/zcode-folder-full-path/config.json 设置 autoApply=false 关闭，notify=false 关闭系统通知）；已生效时零输出。",
+  "description": "zcode-folder-full-path: 会话启动与用户提交消息时自动确保 ZCode UI 注入 loader 在位（幂等，装上后自动完成配置）。首装或 ZCode 升级覆盖 asar 后自动重装指针并提示重启一次（可在 ~/.zcode/zcode-folder-full-path/config.json 设置 autoApply=false 关闭，notify=false 关闭系统通知）；已生效时零输出。",
   "hooks": {
     "SessionStart": [
       {

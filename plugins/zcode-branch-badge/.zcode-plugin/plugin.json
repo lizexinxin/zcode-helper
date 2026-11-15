@@ -1,7 +1,7 @@
 {
   "name": "zcode-branch-badge",
-  "version": "0.2.3",
-  "description": "ZCode「编辑项目 → 源文件夹」列表中为 git 仓库显示当前分支徽章（⎇ main）。装上即生效：hook 自动安装注入 loader 与本地分支查询服务，首装后重启一次 ZCode 即生效，此后开关即时生效、零重启；失败静默不影响 ZCode 功能。",
+  "version": "0.2.4",
+  "description": "ZCode「编辑项目 → 源文件夹」列表中为 git 仓库显示当前分支徽章（⎇ main）。装上后 hook 自动完成配置并拉起本地分支查询服务，重启一次 ZCode 生效，此后开关即时生效、零重启；失败静默不影响 ZCode 功能。",
   "author": {
     "name": "zexin.li"
   },

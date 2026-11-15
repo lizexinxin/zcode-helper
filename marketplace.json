@@ -1,6 +1,6 @@
 {
   "name": "zcode-helper-marketplace",
-  "description": "自用 ZCode 客户端 UI 定制插件市场，包含两个独立插件：zcode-folder-full-path（源文件夹显示完整路径）、zcode-branch-badge（git 分支徽章）。装上即生效：hook 自动安装注入 loader（首装后重启一次 ZCode，之后开关即时生效、零重启）。",
+  "description": "自用 ZCode 客户端 UI 定制插件市场，包含两个独立插件：zcode-folder-full-path（源文件夹显示完整路径）、zcode-branch-badge（git 分支徽章）。装上后 hook 自动完成配置，重启一次 ZCode 生效；之后开关即时生效、零重启。",
   "owner": {
     "name": "zexin.li"
   },
@@ -8,14 +8,14 @@
     {
       "name": "zcode-folder-full-path",
       "source": "./plugins/zcode-folder-full-path",
-      "version": "0.2.3",
-      "description": "ZCode 编辑项目时源文件夹显示完整路径（原只显示文件夹名）。装上即生效：hook 自动安装注入 loader（首装后重启一次 ZCode，之后开关即时生效、零重启），不修改任何压缩 JS。",
+      "version": "0.2.4",
+      "description": "ZCode 编辑项目时源文件夹显示完整路径（原只显示文件夹名）。装上后 hook 自动完成配置，重启一次 ZCode 生效；之后开关即时生效、零重启，不修改任何压缩 JS。",
       "displayName": "ZCode Folder Full Path",
       "displayName_i18n": {
         "zh-CN": "ZCode 源文件夹完整路径"
       },
       "description_i18n": {
-        "zh-CN": "ZCode 编辑项目时源文件夹显示完整路径（原只显示文件夹名）。装上即生效：hook 自动安装注入 loader（首装后重启一次 ZCode，之后开关即时生效、零重启），不修改任何压缩 JS。"
+        "zh-CN": "ZCode 编辑项目时源文件夹显示完整路径（原只显示文件夹名）。装上后 hook 自动完成配置，重启一次 ZCode 生效；之后开关即时生效、零重启，不修改任何压缩 JS。"
       },
       "category": "developer-tools",
       "keywords": [
@@ -28,14 +28,14 @@
     {
       "name": "zcode-branch-badge",
       "source": "./plugins/zcode-branch-badge",
-      "version": "0.2.3",
-      "description": "ZCode 编辑项目时为 git 仓库源文件夹显示当前分支徽章（⎇ main）。装上即生效：hook 自动安装注入 loader 与本地分支查询服务（首装后重启一次 ZCode，之后开关即时生效、零重启），失败静默不影响 ZCode 功能。",
+      "version": "0.2.4",
+      "description": "ZCode 编辑项目时为 git 仓库源文件夹显示当前分支徽章（⎇ main）。装上后 hook 自动完成配置并拉起本地分支查询服务，重启一次 ZCode 生效；之后开关即时生效、零重启，失败静默不影响 ZCode 功能。",
       "displayName": "ZCode Branch Badge",
       "displayName_i18n": {
         "zh-CN": "ZCode git 分支徽章"
       },
       "description_i18n": {
-        "zh-CN": "ZCode 编辑项目时为 git 仓库源文件夹显示当前分支徽章（⎇ main）。装上即生效：hook 自动安装注入 loader 与本地分支查询服务（首装后重启一次 ZCode，之后开关即时生效、零重启），失败静默不影响 ZCode 功能。"
+        "zh-CN": "ZCode 编辑项目时为 git 仓库源文件夹显示当前分支徽章（⎇ main）。装上后 hook 自动完成配置并拉起本地分支查询服务，重启一次 ZCode 生效；之后开关即时生效、零重启，失败静默不影响 ZCode 功能。"
       },
       "category": "developer-tools",
       "keywords": [

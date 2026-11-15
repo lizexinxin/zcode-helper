@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 from pathlib import Path
 from unittest import mock
@@ -40,6 +41,7 @@ def _isolated(hook, tmp: str) -> None:
     hook.LOADER_HOME = Path(tmp) / "loaderhome"
     hook.INSTALL_LOCK = hook.LOADER_HOME / "install.lock"
     hook.ACTIVE_FILE = hook.LOADER_HOME / "active.json"
+    hook.REMINDER_FILE = hook.LOADER_HOME / "restart-reminder.json"
 
 
 def _active_file(tmp: str, pid: int) -> Path:
@@ -187,6 +189,55 @@ def test_already_with_dead_pid_prompts_restart():
     with tempfile.TemporaryDirectory() as tmp:
         _isolated(hook, tmp)
         hook.ACTIVE_FILE = _active_file(tmp, _dead_pid())
+        with mock.patch.object(hook.subprocess, "run") as run:
+            run.return_value = _fake_proc('{"action": "already"}')
+            assert "重新打开" in _run_main(hook)
+
+
+def test_second_reminder_within_cooldown_is_silent():
+    """首装后接连两波触发（SessionStart → UserPromptSubmit）只提醒一次。
+
+    复现真实场景：第一波 installed 提醒「已自动安装」，几秒后第二波
+    already+未激活 的「待生效」必须静默，不能两条通知连发。
+    """
+    hook = load_hook("hook_cooldown")
+    with tempfile.TemporaryDirectory() as tmp:
+        _isolated(hook, tmp)
+        with mock.patch.object(hook.subprocess, "run") as run:
+            run.return_value = _fake_proc('{"action": "installed"}')
+            assert "重新打开" in _run_main(hook)
+            run.return_value = _fake_proc('{"action": "already"}')
+            assert _run_main(hook) == ""
+            # 两种文案各自只出现一次：冷却不区分来源
+            hook.REMINDER_FILE.unlink()
+            run.return_value = _fake_proc('{"action": "already"}')
+            assert "重新打开" in _run_main(hook)
+            run.return_value = _fake_proc('{"action": "installed"}')
+            assert _run_main(hook) == ""
+
+
+def test_reminder_after_cooldown_expires():
+    """冷却期过后（一直没重启）恢复提醒，不丢失持续提醒能力。"""
+    hook = load_hook("hook_cooldown_expire")
+    with tempfile.TemporaryDirectory() as tmp:
+        _isolated(hook, tmp)
+        hook.REMINDER_FILE.parent.mkdir(parents=True, exist_ok=True)
+        hook.REMINDER_FILE.write_text(
+            json.dumps({"ts": time.time() - hook.REMINDER_COOLDOWN_SEC - 1}),
+            encoding="utf-8",
+        )
+        with mock.patch.object(hook.subprocess, "run") as run:
+            run.return_value = _fake_proc('{"action": "already"}')
+            assert "重新打开" in _run_main(hook)
+
+
+def test_reminder_file_unwritable_still_reminds():
+    """冷却状态文件写不进去时退化为每次都提醒，不影响主流程。"""
+    hook = load_hook("hook_cooldown_unwritable")
+    with tempfile.TemporaryDirectory() as tmp:
+        _isolated(hook, tmp)
+        hook.REMINDER_FILE = Path(tmp) / "no-such-dir" / "sub" / "r.json"
+        (Path(tmp) / "no-such-dir").write_text("", encoding="utf-8")  # 占位成文件，mkdir 必败
         with mock.patch.object(hook.subprocess, "run") as run:
             run.return_value = _fake_proc('{"action": "already"}')
             assert "重新打开" in _run_main(hook)

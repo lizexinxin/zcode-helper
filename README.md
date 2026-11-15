@@ -67,26 +67,28 @@ ZCode 会在仓库根目录找到 `marketplace.json`，市场名称为 `zcode-he
 
 ![开启两个插件](docs/images/plugins-enabled.png)
 
-### 3. 装上即生效（唯一一次手动步骤：重启一次）
+### 3. 打开一个会话，等系统通知
 
-安装并启用插件后，hook 会自动完成剩下的所有事情——**在任意会话里发一条消息**
-（UserPromptSubmit hook）**或开一个新会话**（SessionStart hook）：
+插件启用后**不需要敲任何命令**。**打开一个已存在的会话**，或者**新开一个会话
+并随便发一句话**（比如 Hi），插件就会自动完成剩下的配置。几秒到几十秒后，
+你会收到一条系统通知：
 
-- 自动执行 `loader install`（幂等）：同步 loader 资产到 `~/.zcode/zcode-helper/`，
-  并整包重打包 app.asar 写入一行 `import()` 指针（首装约数十秒）；
-- 自动拉起本地分支服务（仅 branch-badge 插件携带）；
-- 会话里出现提示 + macOS 系统通知：**完全退出 ZCode**（菜单 → 退出，关闭窗口不算），
-  再重新打开一次。
+![提醒重启一次的系统通知](docs/images/restart-notice.png)
 
-这是最后一次因为装插件而重启——之后一切改动都即时生效。也可以手动执行：
+- 没看到通知？说明之前已经配置好并生效了，一切正常。
+- 提醒不会错过：只要还没重启生效，之后每次打开会话或发消息都会再提醒
+  （同一小段时间内只提醒一次，不会连环轰炸）；重启成功后就完全安静，不再打扰。
+- 不想弹系统通知、或想关闭这个自动配置：在 `~/.zcode/<插件名>/config.json`
+  里配置 `{"notify": false}` / `{"autoApply": false}`（不配也行，默认都开着）。
 
-```bash
-python3 plugins/zcode-folder-full-path/scripts/zcode_helper.py loader install
-```
+### 4. 重启一次，生效
 
-需要重启的提醒会一直出现（hook 每次触发检查 `active.json` 的 pid），直到重启生效为止；
-也可以在 `~/.zcode/<插件名>/config.json` 里配置 `{"autoApply": false}` 关闭自动安装、
-`{"notify": false}` 关闭系统通知。
+收到通知后，**完全退出 ZCode，再重新打开**。这是唯一一次要手动做的事：
+
+- 「完全退出」是指菜单栏 **ZCode → 退出 ZCode**（快捷键 ⌘Q）；只点窗口的
+  关闭按钮不算。
+- 这也是最后一次因为装插件而重启——之后开关插件、更新版本都即时生效，
+  不用再重启。
 
 ## 开关即插即用
 
@@ -94,7 +96,8 @@ loader 安装完成后，**插件市场里的开关拨动立即生效**（运行
 
 - 开关拨到开 → 立即注入对应 UI 模块；
 - 开关拨到关 → 立即完整拆除（DOM、样式、监听全部移除，无残留）；
-- 新开窗口/页面刷新后自动重放已启用模块。
+- 新开一个窗口、或界面重新加载时，已开启的插件效果会自动应用到新界面上，
+  不用重新设置。
 
 ## 常用命令
 
@@ -120,17 +123,23 @@ ZCode 的插件机制没有任何 UI 扩展点，界面代码打包在
 本仓库采用**主进程 loader + 运行时注入**架构：
 
 ```
-SessionStart / UserPromptSubmit hook（装上即自动安装）
-  → app.asar 的 out/main/index.js 尾部只有一行 dynamic import() 指针
+SessionStart / UserPromptSubmit hook（打开会话、每次发消息时触发，装上即自动安装）
+  → 幂等执行 loader install：同步 loader 资产到 ~/.zcode/zcode-helper/，
+    整包重打包 app.asar 写入一行 dynamic import() 指针（首装约数十秒）；
+    branch-badge 插件还会顺手 best-effort 拉起本地分支服务
+  → app.asar 的 out/main/index.js 尾部只有一行 import() 指针
       → 指向磁盘上的 ~/.zcode/zcode-helper/loader.cjs（常驻主进程）
           ├─ fs.watch ~/.zcode/cli/config.json 的 enabledPlugins（插件开关实时落盘处）
           ├─ 开关变化 → webContents.executeJavaScript 注入/拆除模块（DOM 立即变化）
-          └─ 新窗口 / 页面刷新 → 自动重放已启用模块（模块幂等）
+          └─ 新窗口 / 界面重新加载 → 自动把已启用的模块重新注入新界面（模块幂等）
 ```
 
-loader 激活时原子写 `~/.zcode/zcode-helper/active.json`（pid + 时间戳）：
-hook 用它判活，把「指针已装但 ZCode 未重启」和「已生效」区分开——前者持续提醒重启，
-后者完全静默（`loader status` 的 `已安装(已激活/未激活)` 也来自这里）。
+hook 判活与重启提醒：loader 激活时原子写 `~/.zcode/zcode-helper/active.json`
+（pid + 时间戳），hook 用它区分「指针已装但 ZCode 未重启」和「已生效」——前者
+提醒重启（系统通知 + 会话提示，手动等价命令是 `loader install`，见上文常用命令），
+后者完全静默（`loader status` 的 `已安装(已激活/未激活)` 也来自这里）。提醒带
+10 分钟冷却（`restart-reminder.json`）：SessionStart 与 UserPromptSubmit 接连
+触发只弹一次通知，冷却过后（一直没重启）恢复提醒。
 
 ### 更新插件零重启（壳 + 热更新核心）
 

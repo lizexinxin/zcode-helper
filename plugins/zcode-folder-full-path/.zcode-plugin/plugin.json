@@ -1,7 +1,7 @@
 {
   "name": "zcode-folder-full-path",
-  "version": "0.2.3",
-  "description": "ZCode「编辑项目 → 源文件夹」列表直接显示完整路径（原只显示文件夹名），解决同名文件夹无法区分的问题。装上即生效：hook 自动安装注入 loader，首装后重启一次 ZCode 即生效，此后开关即时生效、零重启；不修改任何压缩 JS。",
+  "version": "0.2.4",
+  "description": "ZCode「编辑项目 → 源文件夹」列表直接显示完整路径（原只显示文件夹名），解决同名文件夹无法区分的问题。装上后 hook 自动完成配置，重启一次 ZCode 生效，此后开关即时生效、零重启；不修改任何压缩 JS。",
   "author": {
     "name": "zexin.li"
   },
