@@ -8,7 +8,7 @@
     {
       "name": "zcode-folder-full-path",
       "source": "./plugins/zcode-folder-full-path",
-      "version": "0.2.4",
+      "version": "0.2.5",
       "description": "ZCode 编辑项目时源文件夹显示完整路径（原只显示文件夹名）。装上后 hook 自动完成配置，重启一次 ZCode 生效；之后开关即时生效、零重启，不修改任何压缩 JS。",
       "displayName": "ZCode Folder Full Path",
       "displayName_i18n": {
@@ -28,7 +28,7 @@
     {
       "name": "zcode-branch-badge",
       "source": "./plugins/zcode-branch-badge",
-      "version": "0.2.4",
+      "version": "0.2.5",
       "description": "ZCode 编辑项目时为 git 仓库源文件夹显示当前分支徽章（⎇ main）。装上后 hook 自动完成配置并拉起本地分支查询服务，重启一次 ZCode 生效；之后开关即时生效、零重启，失败静默不影响 ZCode 功能。",
       "displayName": "ZCode Branch Badge",
       "displayName_i18n": {

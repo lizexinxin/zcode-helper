@@ -11,7 +11,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 
-const CORE_VERSION = "0.2.3";
+const CORE_VERSION = "0.2.5";
 
 const HOME_DIR =
   process.env.ZCODE_LOADER_HOME || path.join(os.homedir(), ".zcode", "zcode-helper");
@@ -429,6 +429,21 @@ function semverKey(v) {
   return [num(0), num(1), num(2)];
 }
 
+function filesEqual(src, dst) {
+  /* 逐字节比对：copyFileSync 即便内容相同也会更新 mtime，而引导壳靠
+   * inode+mtime 指纹判断核心变化 → 相同内容重拷会白白触发热更新。
+   * 0.2.4 发版漏 bump CORE_VERSION，版本比较永远判「有新版」，每秒
+   * 重拷 + 每秒热更新死循环；内容一致就跳过拷贝，从根上掐断这类循环。 */
+  try {
+    const s1 = fs.statSync(src);
+    const s2 = fs.statSync(dst);
+    if (!s1.isFile() || !s2.isFile() || s1.size !== s2.size) return false;
+    return fs.readFileSync(src).equals(fs.readFileSync(dst));
+  } catch (_) {
+    return false; // 任一文件读不到：当作不同，走正常拷贝
+  }
+}
+
 function selfSyncFromCache() {
   /* 自同步：扫描插件缓存，发现比自己新的版本就把资产（core.cjs + modules）
    * 拷进 HOME_DIR——core.cjs 变化由引导壳热更新，模块下次注入现读。
@@ -466,7 +481,7 @@ function selfSyncFromCache() {
     for (const f of ["loader.cjs", "core.cjs"]) {
       const src = path.join(best.dir, f);
       try {
-        if (fs.existsSync(src)) {
+        if (fs.existsSync(src) && !filesEqual(src, path.join(HOME_DIR, f))) {
           fs.copyFileSync(src, path.join(HOME_DIR, f));
           copied.push(f);
         }
@@ -478,15 +493,34 @@ function selfSyncFromCache() {
         fs.mkdirSync(MODULES_DIR, { recursive: true });
         for (const f of fs.readdirSync(srcModules)) {
           if (!/\.js$/.test(f)) continue;
-          fs.copyFileSync(path.join(srcModules, f), path.join(MODULES_DIR, f));
-          copied.push("modules/" + f);
+          const src = path.join(srcModules, f);
+          if (!filesEqual(src, path.join(MODULES_DIR, f))) {
+            fs.copyFileSync(src, path.join(MODULES_DIR, f));
+            copied.push("modules/" + f);
+          }
         }
       }
     } catch (_) {}
+    /* version.txt 只在内容变化时写：它无人监听，写坏不致命，但保持零变更
+     * 零落盘，日志也只在真有更新时出现。 */
+    let versionLogged = false;
     try {
-      fs.writeFileSync(VERSION_PATH, best.v + "\n");
+      const mark = best.v + "\n";
+      let cur = null;
+      try {
+        cur = fs.readFileSync(VERSION_PATH, "utf8");
+      } catch (_) {}
+      if (cur !== mark) {
+        fs.writeFileSync(VERSION_PATH, mark);
+        versionLogged = true;
+      }
     } catch (_) {}
-    log("自同步：发现插件缓存新版本 " + best.v + "，已更新 " + copied.join(", "));
+    if (copied.length || versionLogged) {
+      log(
+        "自同步：发现插件缓存新版本 " + best.v + "，已更新 " +
+          (copied.length ? copied.join(", ") : "无文件变化")
+      );
+    }
   } catch (exc) {
     log("自同步失败: " + (exc && exc.message));
   }

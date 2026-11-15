@@ -931,6 +931,19 @@ def version_key(version: str) -> tuple:
     return tuple(parts)
 
 
+def files_equal(src: Path, dst: Path) -> bool:
+    """逐字节比对（先比大小再比内容）。copyfile 即便内容相同也会更新 mtime，
+    而引导壳靠 inode+mtime 指纹判断核心变化——相同内容重拷会白白触发热更新。
+    任一文件读不到时返回 False，走正常拷贝。"""
+    try:
+        s1, s2 = src.stat(), dst.stat()
+        if not s1.is_file() or not s2.is_file() or s1.st_size != s2.st_size:
+            return False
+        return src.read_bytes() == dst.read_bytes()
+    except OSError:
+        return False
+
+
 def sync_loader_assets() -> list[str]:
     """把 loader 资产（loader.cjs 壳 + core.cjs 核心 + modules/*.js）拷到 LOADER_HOME。
 
@@ -950,12 +963,13 @@ def sync_loader_assets() -> list[str]:
 
     copied: list[str] = []
     src_loader = LOADER_ASSETS_DIR / "loader.cjs"
-    if src_loader.is_file():
+    if src_loader.is_file() and not files_equal(src_loader, LOADER_HOME / "loader.cjs"):
         LOADER_HOME.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src_loader, LOADER_HOME / "loader.cjs")
         copied.append("loader.cjs")
     src_core = LOADER_ASSETS_DIR / "core.cjs"
-    if src_core.is_file():
+    if src_core.is_file() and not files_equal(src_core, LOADER_HOME / "core.cjs"):
+        LOADER_HOME.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src_core, LOADER_HOME / "core.cjs")
         copied.append("core.cjs")
     src_modules = LOADER_ASSETS_DIR / "modules"
@@ -963,9 +977,12 @@ def sync_loader_assets() -> list[str]:
         dst = LOADER_HOME / "modules"
         dst.mkdir(parents=True, exist_ok=True)
         for js in sorted(src_modules.glob("*.js")):
-            shutil.copyfile(js, dst / js.name)
-            copied.append("modules/" + js.name)
-    if copied:
+            if not files_equal(js, dst / js.name):
+                shutil.copyfile(js, dst / js.name)
+                copied.append("modules/" + js.name)
+    if copied or incoming > current:
+        # 内容一致没拷贝时也要推进版本水位：否则水位滞后，旧版本缓存里的
+        # hook（incoming == 滞后水位）仍会通过防降级把旧资产盖回来。
         try:
             (LOADER_HOME / "version.txt").write_text(plugin_version() + "\n", encoding="utf-8")
         except OSError:
