@@ -212,6 +212,49 @@ def test_toggle_reports_error_on_broken_config():
         assert payload and payload["action"] == "error"
 
 
+def test_sync_version_guard_blocks_downgrade():
+    """version.txt 已是更高版本时（旧缓存 hook 场景），资产同步必须跳过。
+
+    回归背景：0.2.2→0.2.3 更新后，会话中途更新插件时本会话 hook 仍指向
+    0.2.1 缓存路径并持续把旧资产同步回去，导致升级「看似无效」。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        td = Path(tmp)
+        asar = td / "app.asar"
+        zh.write_asar(asar, make_files())
+        make_assets(td)
+        home = td / "loaderhome"
+        home.mkdir(parents=True)
+        (home / "loader.cjs").write_text("// 已是新版壳\n", encoding="utf-8")
+        (home / "core.cjs").write_text("// 已是新版核心\n", encoding="utf-8")
+        (home / "version.txt").write_text("9.9.9\n", encoding="utf-8")
+
+        proc = run_tool(asar, td, "--json", "loader", "install", "--quiet")
+        payload = last_json(proc.stdout)
+        assert payload and payload["action"] == "installed", proc.stdout  # 指针照常安装
+        assert payload["synced"] == [], "防降级应跳过资产同步"
+        assert (home / "loader.cjs").read_text(encoding="utf-8") == "// 已是新版壳\n"
+        assert (home / "core.cjs").read_text(encoding="utf-8") == "// 已是新版核心\n"
+        assert (home / "version.txt").read_text(encoding="utf-8").strip() == "9.9.9"
+
+
+def test_sync_forced_when_loader_files_missing():
+    """壳/核心文件缺失时无视防降级强制同步（修复被清空的运行目录）。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        td = Path(tmp)
+        asar = td / "app.asar"
+        zh.write_asar(asar, make_files())
+        make_assets(td)
+        home = td / "loaderhome"
+        home.mkdir(parents=True)
+        (home / "version.txt").write_text("9.9.9\n", encoding="utf-8")
+
+        proc = run_tool(asar, td, "--json", "loader", "install", "--quiet")
+        payload = last_json(proc.stdout)
+        assert payload and payload["action"] == "installed", proc.stdout
+        assert (home / "loader.cjs").is_file(), "文件缺失时应无视防降级强制同步"
+        assert (home / "version.txt").read_text(encoding="utf-8").strip() == zh.plugin_version()
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

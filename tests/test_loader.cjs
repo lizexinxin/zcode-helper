@@ -218,3 +218,77 @@ test("activate 写入 active.json 激活凭证，重复激活返回 already", ()
   assert.strictEqual(active.version, 1);
   assert.strictEqual(loader.activate(), "already");
 });
+
+test("core.cjs 变更触发热更新：无需重启即可应用新核心", async () => {
+  // 把壳 + 核心复制到独立目录，require 第二个壳实例（不污染 shared 真源）
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "zch-hot-"));
+  fs.copyFileSync(path.join(__dirname, "..", "shared", "loader.cjs"), path.join(tmp, "loader.cjs"));
+  fs.copyFileSync(path.join(__dirname, "..", "shared", "core.cjs"), path.join(tmp, "core.cjs"));
+  const prevHome = process.env.ZCODE_LOADER_HOME;
+  const prevConfig = process.env.ZCODE_LOADER_CONFIG;
+  process.env.ZCODE_LOADER_HOME = tmp;
+  process.env.ZCODE_LOADER_CONFIG = path.join(tmp, "config.json");
+  try {
+    const shim = require(path.join(tmp, "loader.cjs"));
+    assert.strictEqual(shim.activate(), "ok");
+    const before = JSON.parse(fs.readFileSync(path.join(tmp, "active.json"), "utf8")).activatedAt;
+
+    // 模拟 hook 自同步 / 自同步写入新核心：文件指纹变化即触发
+    fs.appendFileSync(path.join(tmp, "core.cjs"), "\n// hot-reload marker\n");
+    await new Promise((r) => setTimeout(r, 2500)); // 壳的 1s 轮询 + 300ms 防抖 + 重载
+
+    const after = JSON.parse(fs.readFileSync(path.join(tmp, "active.json"), "utf8")).activatedAt;
+    assert.notStrictEqual(after, before, "核心应被热更新并重新激活");
+    const logTxt = fs.readFileSync(path.join(tmp, "loader.log"), "utf8");
+    assert.ok(logTxt.includes("热更新核心"), "应记录热更新日志");
+    assert.strictEqual(shim.activate(), "already", "壳级幂等不受热更新影响");
+  } finally {
+    if (prevHome === undefined) delete process.env.ZCODE_LOADER_HOME;
+    else process.env.ZCODE_LOADER_HOME = prevHome;
+    if (prevConfig === undefined) delete process.env.ZCODE_LOADER_CONFIG;
+    else process.env.ZCODE_LOADER_CONFIG = prevConfig;
+  }
+});
+
+test("自同步：发现插件缓存更高版本时更新 core.cjs 并热加载", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "zch-selfsync-"));
+  fs.copyFileSync(path.join(__dirname, "..", "shared", "loader.cjs"), path.join(tmp, "loader.cjs"));
+  fs.copyFileSync(path.join(__dirname, "..", "shared", "core.cjs"), path.join(tmp, "core.cjs"));
+  // 伪造插件缓存：某市场下有 9.9.9 新版本
+  const cacheRoot = path.join(tmp, "cache");
+  const newLoaderDir = path.join(cacheRoot, "some-market", "zcode-folder-full-path", "9.9.9", "loader");
+  fs.mkdirSync(newLoaderDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(newLoaderDir, "core.cjs"),
+    'const CORE_VERSION = "9.9.9";\n' +
+      'module.exports = { CORE_VERSION, activate: function () { return "ok"; }, dispose: function () {} };\n'
+  );
+  const prevHome = process.env.ZCODE_LOADER_HOME;
+  const prevConfig = process.env.ZCODE_LOADER_CONFIG;
+  const prevCache = process.env.ZCODE_LOADER_CACHE;
+  process.env.ZCODE_LOADER_HOME = tmp;
+  process.env.ZCODE_LOADER_CONFIG = path.join(tmp, "config.json");
+  process.env.ZCODE_LOADER_CACHE = cacheRoot;
+  try {
+    const shim = require(path.join(tmp, "loader.cjs"));
+    assert.strictEqual(shim.activate(), "ok");
+    // 生产里由 1s 轮询触发；测试环境核心不开轮询，直接调用保持确定性
+    shim.selfSyncFromCache();
+    assert.ok(
+      fs.readFileSync(path.join(tmp, "core.cjs"), "utf8").includes("9.9.9"),
+      "core.cjs 应被自同步覆盖为新版本"
+    );
+    await new Promise((r) => setTimeout(r, 2000)); // 等壳的热更新
+    const logTxt = fs.readFileSync(path.join(tmp, "loader.log"), "utf8");
+    assert.ok(logTxt.includes("自同步"), "应记录自同步日志");
+    assert.ok(logTxt.includes("热更新核心"), "自同步的新核心应被热加载");
+    assert.strictEqual(shim.CORE_VERSION, "9.9.9", "导出的核心版本应随热更新刷新");
+  } finally {
+    if (prevHome === undefined) delete process.env.ZCODE_LOADER_HOME;
+    else process.env.ZCODE_LOADER_HOME = prevHome;
+    if (prevConfig === undefined) delete process.env.ZCODE_LOADER_CONFIG;
+    else process.env.ZCODE_LOADER_CONFIG = prevConfig;
+    if (prevCache === undefined) delete process.env.ZCODE_LOADER_CACHE;
+    else process.env.ZCODE_LOADER_CACHE = prevCache;
+  }
+});

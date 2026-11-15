@@ -911,14 +911,53 @@ def loader_active() -> bool:
     return True
 
 
+def plugin_version() -> str:
+    """本引擎所属插件的版本（清单 version），用于资产同步防降级。"""
+    try:
+        data = json.loads((PLUGIN_ROOT / ".zcode-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        return str(data.get("version") or "0.0.0")
+    except (OSError, ValueError):
+        return "0.0.0"
+
+
+def version_key(version: str) -> tuple:
+    """'0.2.3' → (0, 2, 3)；缺失段补 0，非数字段按 0 处理。"""
+    parts = []
+    for seg in str(version).split(".")[:3]:
+        digits = "".join(ch for ch in seg if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts)
+
+
 def sync_loader_assets() -> list[str]:
-    """把 loader 资产（loader.cjs + modules/*.js）拷到 LOADER_HOME。"""
+    """把 loader 资产（loader.cjs 壳 + core.cjs 核心 + modules/*.js）拷到 LOADER_HOME。
+
+    防降级：version.txt 记录已同步版本。更新插件后，旧版本缓存目录里的 hook
+    （会话中途更新时仍指向旧路径）可能继续触发同步——来源版本低于已同步版本时
+    跳过，避免旧资产覆盖新资产（0.2.2→0.2.3 曾因此让升级「看似无效」）。
+    壳/核心文件缺失时无视防降级强制同步（修复被清空的运行目录）。"""
+    incoming = version_key(plugin_version())
+    current = (0, 0, 0)
+    try:
+        current = version_key((LOADER_HOME / "version.txt").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        pass
+    files_missing = not (LOADER_HOME / "loader.cjs").is_file() or not (LOADER_HOME / "core.cjs").is_file()
+    if incoming < current and not files_missing:
+        return []
+
     copied: list[str] = []
     src_loader = LOADER_ASSETS_DIR / "loader.cjs"
     if src_loader.is_file():
         LOADER_HOME.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src_loader, LOADER_HOME / "loader.cjs")
         copied.append("loader.cjs")
+    src_core = LOADER_ASSETS_DIR / "core.cjs"
+    if src_core.is_file():
+        shutil.copyfile(src_core, LOADER_HOME / "core.cjs")
+        copied.append("core.cjs")
     src_modules = LOADER_ASSETS_DIR / "modules"
     if src_modules.is_dir():
         dst = LOADER_HOME / "modules"
@@ -926,6 +965,11 @@ def sync_loader_assets() -> list[str]:
         for js in sorted(src_modules.glob("*.js")):
             shutil.copyfile(js, dst / js.name)
             copied.append("modules/" + js.name)
+    if copied:
+        try:
+            (LOADER_HOME / "version.txt").write_text(plugin_version() + "\n", encoding="utf-8")
+        except OSError:
+            pass
     return copied
 
 

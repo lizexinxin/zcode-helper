@@ -132,6 +132,21 @@ loader 激活时原子写 `~/.zcode/zcode-helper/active.json`（pid + 时间戳�
 hook 用它判活，把「指针已装但 ZCode 未重启」和「已生效」区分开——前者持续提醒重启，
 后者完全静默（`loader status` 的 `已安装(已激活/未激活)` 也来自这里）。
 
+### 更新插件零重启（壳 + 热更新核心）
+
+`loader.cjs` 是**引导壳**，只负责被 asar 指针加载与热监听，基本永久不变；
+真正的逻辑在 `core.cjs`（核心），模块每次注入现读。更新链路完全不依赖 hook：
+
+- **引擎同步防降级**：`version.txt` 记录已同步版本，旧版本缓存里的 hook
+  （会话中途更新时仍指向旧路径）无法把新资产覆盖回旧版；
+- **自同步**：核心每秒扫描插件缓存目录，发现更高版本自动把
+  `core.cjs + modules` 同步到运行目录；
+- **热更新**：壳监听 `core.cjs` 指纹，变化即 dispose 旧核心、热加载新核心
+  并重新激活（重新注入），全程无需重启 ZCode。
+
+因此：**首次安装需要一次重启（写指针），之后的插件更新全部即时生效。**
+只有引导壳自身或 asar 指针变更才需要重启（极少发生）。
+
 - **渲染模块**（`~/.zcode/zcode-helper/modules/*.js`）每次注入都从磁盘现读：
   改模块代码，下次开关切换或页面刷新即用新版，零重启、不碰 asar。
 - **folder-full-path** 模块是纯 CSS 覆盖（锚定 `data-testid` 语义钩子，
@@ -162,7 +177,7 @@ loader（`loader.cjs`）与渲染模块（`modules/*.js`）的真源在 `shared/
 然后同步到所有副本：
 
 ```bash
-for f in zcode_helper.py:scripts session-start.py:hooks loader.cjs:loader; do
+for f in zcode_helper.py:scripts session-start.py:hooks loader.cjs:loader core.cjs:loader; do
   src=${f%%:*}; dst=${f##*:}
   cp shared/$src plugins/zcode-folder-full-path/$dst/
   cp shared/$src plugins/zcode-branch-badge/$dst/
@@ -205,20 +220,21 @@ marketplace.json                     # 插件市场清单（仓库根，ZCode �
 shared/
   zcode_helper.py                    # 引擎真源（asar 解析/重打包 + loader 命令 + daemon）
   session-start.py                   # SessionStart/UserPromptSubmit hook 真源（自动安装 loader + 重启提醒）
-  loader.cjs                         # 主进程 loader 真源
+  loader.cjs                         # 引导壳真源（asar 指针加载；热监听 core）
+  core.cjs                           # 核心/真源（注入 + 开关联动 + 自同步，变更即热更新）
   modules/                           # 渲染模块真源
     folder-full-path.js              #   完整路径（纯 CSS）
     branch-badge.js                  #   分支徽章（DOM + daemon 查询）
 plugins/
   zcode-folder-full-path/            # 插件1：源文件夹完整路径
     .zcode-plugin/plugin.json
-    loader/{loader.cjs, modules/}    # 副本
+    loader/{loader.cjs, core.cjs, modules/}    # 副本
     scripts/zcode_helper.py          # 副本
     hooks/{hooks.json, session-start.py}
     commands/  skills/
   zcode-branch-badge/                # 插件2：git 分支徽章
     .zcode-plugin/plugin.json
-    loader/{loader.cjs, modules/}    # 副本
+    loader/{loader.cjs, core.cjs, modules/}    # 副本
     scripts/{zcode_helper.py, zch_branch_daemon.py}
     hooks/{hooks.json, session-start.py}
     commands/  skills/

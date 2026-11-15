@@ -21,6 +21,7 @@ COPY_MAP = [
     ("zcode_helper.py", "scripts/zcode_helper.py"),
     ("session-start.py", "hooks/session-start.py"),
     ("loader.cjs", "loader/loader.cjs"),
+    ("core.cjs", "loader/core.cjs"),
     ("modules/folder-full-path.js", "loader/modules/folder-full-path.js"),
     ("modules/branch-badge.js", "loader/modules/branch-badge.js"),
     ("modules/market-switch-bridge.js", "loader/modules/market-switch-bridge.js"),
