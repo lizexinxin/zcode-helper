@@ -1,10 +1,11 @@
 /* zch-loader 核心：ZCode 主进程的注入与开关联动逻辑。
  * 由引导壳 loader.cjs 加载；文件变更时壳会 dispose + 热重载本文件，
  * 因此本文件的更新无需重启 ZCode（壳与 asar 指针才需要）。
- * 职责：作为 observer 读插件开关的合并视图——用户级 ~/.zcode/cli/config.json
- * 打底、工作区项目文件覆盖（工作区从 agent 日志尾部的 workspacePath 发现）
- * ——与 UI 开关显示同源，结构性不漂移；用 webContents.executeJavaScript 向
- * 渲染进程注入/拆除 UI 模块（~/.zcode/zcode-helper/modules/*.js）；扫描插件
+ * 职责：插件开关只认用户级 ~/.zcode/cli/config.json（0.2.8）。ZCode 拨市场
+ * 开关时会把值写进当前项目的工作区 config，拦不住——所以核心做「归位」：
+ * 一旦在工作区层发现本插件的键，立即把值迁回用户级并从工作区删除，删完后
+ * 工作区层恒为空，UI 的合并显示天然恒等于用户级；用 webContents.executeJavaScript
+ * 向渲染进程注入/拆除 UI 模块（~/.zcode/zcode-helper/modules/*.js）；扫描插件
  * 缓存自同步新版本资产；每 10 秒向本地分支服务发心跳（daemon 据此在 ZCode
  * 退出后自动退场）。任何异常只写 loader.log，绝不抛向主进程。 */
 "use strict";
@@ -14,7 +15,7 @@ const path = require("node:path");
 const os = require("node:os");
 const http = require("node:http");
 
-const CORE_VERSION = "0.2.7";
+const CORE_VERSION = "0.2.8";
 
 const HOME_DIR =
   process.env.ZCODE_LOADER_HOME || path.join(os.homedir(), ".zcode", "zcode-helper");
@@ -43,21 +44,21 @@ const POLL_MS = 1000;
 const PROBE_PATH = path.join(HOME_DIR, "probe.js");
 const PROBE_OUT = path.join(HOME_DIR, "probe.out.log");
 
-/* 插件启用状态合并（observer 架构）：UI 开关点击经 renderer→window-host→agent
- * RPC（plugins/setEnabled）由 agent 原子写入用户级或工作区级 config，UI 显示
- * 的是合并视图——project 层覆盖 user 层，越靠近工作目录的文件越后合并越优先
- * （对齐 zcode.cjs 的 mergeConfigs/discoverProjectConfigPaths）。核心不再反推
- * UI、不再写 config：读同一份合并视图，显示与生效从同一数据推导，不会漂移。
- * 0.2.6 及之前的「DOM 桥接点击意图 + 写回用户级 config」链路已删除——它的
- * 前提（市场开关不写 config.json）实测是错的：开关写的是工作区级文件。 */
+/* 插件启用状态（0.2.8 归位架构）：ZCode 的开关是 VS Code 式双层设计——用户级
+ * ~/.zcode/cli/config.json + 项目级 <项目>/.zcode/config.json，UI 显示合并结果
+ * （项目覆盖用户、不标来源）。拨开关时 agent 把值写进当前窗口主项目的工作区
+ * config，拦不住；本插件以用户级为唯一真相：一旦在工作区层发现本插件的键，
+ * 立即迁回用户级并从工作区删除（harmonizeWorkspaceLayers）。删完后工作区层
+ * 恒为空 → 合并显示恒等于用户级 → 任何项目里拨、切到任何项目看都一致。
+ * 0.2.7 的「读合并视图 + 候选裁决」已删除——那是在适配双层语义，不如让双层
+ * 对本插件天然失效。 */
 
 /* 工作区发现：app-server（agent）在本机是共享单例——进程名被改写（zcode-cli）、
  * cwd 固定为数据根（~/.zcode/plugin-workspace）、由 window-host utilityProcess
  * spawn（主进程拦不到 spawn 与 RPC）。工作区路径只出现在 agent 自己的结构化
  * 日志里（~/.zcode/cli/log/zcode-*.jsonl，每条请求的 context 都带
- * workspacePath）。日志是全部会话交错的，「最后一条」未必是当前窗口，所以
- * 不猜当前窗口：取尾部出现过的候选工作区集合，合并视图以「最后被写入的那层」
- * 为准——与用户最近一次拨开关的位置一致。格式变化时安静回落 user-only。 */
+ * workspacePath）。日志是全部会话交错的，所以做增量扫描 + LRU 候选集合——
+ * 归位的扫描范围就来自它。格式变化时安静回落（只读用户级）。 */
 const WORKSPACE_SCAN_EVERY_TICKS = 5; // 1s tick 计数，每 5 秒扫一次日志
 const MAX_PROJECT_DEPTH = 15; // workdir 向上找 .git 根的层数封顶
 const LOG_FULLSCAN_CAP = 64 * 1024 * 1024; // 首扫/换文件全量读的封顶
@@ -173,66 +174,54 @@ function enabledModules(configData) {
   return enabledModulesFromMap(ep);
 }
 
-function readUserEnabledMap() {
-  /* 用户级 config 的 enabledPlugins。读/解析失败返回 null（未知）——轮询
-   * 撞上 ZCode 写 config 的中间态时，误判为「一个都没启用」会把模块全部
-   * 拆掉再装回来。 */
+function readConfigData(file) {
+  /* 读并解析一个 config JSON 文件；失败返回 null（读不到/半截 JSON）。 */
   try {
-    const data = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
-    return (data && data.plugins && data.plugins.enabledPlugins) || {};
-  } catch (exc) {
-    log("读用户级 config 失败: " + (exc && exc.message));
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    return data && typeof data === "object" ? data : null;
+  } catch (_) {
     return null;
   }
 }
 
-function readLayerEnabledMap(file) {
-  /* 单个项目层配置文件（zcode.json / .zcode/config.json）的 enabledPlugins。
-   * 只收存在的文件，读/解析失败视为跳过该层（留痕，不影响其他层）。 */
-  let raw;
+function writeConfigAtomic(file, data) {
+  /* 原子写 JSON（临时文件 + rename，与 ZCode 的写法一致）。失败返回 false。 */
+  const tmp = file + ".zch-tmp";
   try {
-    raw = fs.readFileSync(file, "utf8");
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", "utf8");
+    fs.renameSync(tmp, file);
+    return true;
   } catch (exc) {
-    log("读项目配置失败(跳过该层): " + file + " " + (exc && exc.message));
-    return null;
-  }
-  try {
-    const data = JSON.parse(raw);
-    return (data && data.plugins && data.plugins.enabledPlugins) || {};
-  } catch (exc) {
-    log("解析项目配置失败(跳过该层): " + file + " " + (exc && exc.message));
-    return null;
-  }
-}
-
-function activeWorkspace() {
-  /* 兼容保留：自动模式下没有单一「活动工作区」（见 mergedEnabledMap），
-   * 这里返回最新的候选，仅供日志/诊断。 */
-  return wsCandidates.length ? wsCandidates[0] : null;
-}
-
-function mergedViewFor(ws, user) {
-  /* user 打底 + 指定工作区的项目文件按序覆盖，返回 { map, mtime, hasFiles }。
-   * mtime 取该项目文件的最新修改时间（= 该层最后一次被写的时间）。 */
-  const files = projectConfigFilesFor(ws);
-  const map = Object.assign({}, user);
-  let mtime = 0;
-  for (const f of files) {
+    log("写 " + file + " 失败: " + (exc && exc.message));
     try {
-      const st = fs.statSync(f);
-      if (st.mtimeMs > mtime) mtime = st.mtimeMs;
+      fs.unlinkSync(tmp);
     } catch (_) {}
-    const layer = readLayerEnabledMap(f);
-    if (layer) Object.assign(map, layer);
+    return false;
   }
-  return { map: map, mtime: mtime, hasFiles: files.length > 0 };
+}
+
+function isOurPluginKey(id) {
+  /* 本插件在 enabledPlugins 里的键：zcode-<模块名> 或 zcode-<模块名>@<市场> */
+  const name = String(id).split("@")[0];
+  return MODULE_IDS.some((m) => name === PLUGIN_PREFIX + m);
+}
+
+function readUserEnabledMap() {
+  /* 用户级 config 的 enabledPlugins（唯一真相）。读/解析失败返回 null（未知）
+   * ——轮询撞上 ZCode 写 config 的中间态时，误判为「一个都没启用」会把模块
+   * 全部拆掉再装回来。 */
+  const data = readConfigData(CONFIG_PATH);
+  if (data === null) {
+    log("读用户级 config 失败");
+    return null;
+  }
+  return (data.plugins && data.plugins.enabledPlugins) || {};
 }
 
 function projectConfigFilesFor(workdir) {
-  /* 对齐 agent 的 project 配置发现：从 workdir 向上走到 .git 根（无 .git 则
-   * 到 home 为止，层数封顶），根目录在前、workdir 在后；每目录按 zcode.json、
-   * .zcode/config.json 顺序收集存在的文件——合并顺序即优先级，越靠近
-   * workdir 越后合并、越优先。 */
+  /* 收集一个工作区（含祖先目录）里存在的项目层配置文件：从 workdir 向上走到
+   * .git 根（无 .git 则到 home 为止，层数封顶），根目录在前、workdir 在后；
+   * 每目录按 zcode.json、.zcode/config.json 顺序——归位扫描的范围来源。 */
   const dirs = [];
   let dir = path.resolve(workdir);
   const home = os.homedir();
@@ -256,38 +245,84 @@ function projectConfigFilesFor(workdir) {
   return files;
 }
 
-function mergedEnabledMap(workdir) {
-  /* 复刻 agent 的合并语义：user 层打底，project 层按「根→workdir」顺序覆盖。
-   * 返回 null 表示用户级未知（保持不拆装语义）。
-   * workdir 为字符串（测试）：直接合并该工作区；为数组（测试）：作为候选集；
-   * 缺省用模块状态里日志发现出的 wsCandidates。自动模式下多会话日志交错出
-   * 多个候选工作区，loader 的模块又是全局的，没法知道「当前窗口」是哪个
-   * ——以「最后被写入的那层」为准，与用户最近一次拨开关的位置一致；用户级
-   * 更新或候选都没有项目文件（如草稿会话）时回落 user-only。 */
-  const user = readUserEnabledMap();
-  if (user === null) return null;
-  if (typeof workdir === "string") return mergedViewFor(workdir, user).map;
-  const candidates = Array.isArray(workdir) ? workdir : wsCandidates;
-  let best = null;
-  let bestM = 0;
+function harmonizeWorkspaceLayers(candidates) {
+  /* 归位：工作区层一出现本插件的键就迁回用户级并从工作区删除。
+   * - 迁移方向：工作区文件 mtime 比用户级新 → 该值是用户最近的拨动意图，
+   *   写入用户级（值相同不写，避免无谓落盘）；较旧 → 陈旧键，只清理不迁移。
+   * - 多个工作区都有键时按 mtime 升序处理，新意图最后落、以最新为准。
+   * - 清理保留工作区文件里的其他插件键（如 feishu-lark@local）不动。
+   * - candidates 缺省用模块状态里日志发现出的 wsCandidates（测试可注入数组）。
+   * 返回 { migrated, cleaned, failed }；failed 时 syncFromConfig 下个 tick 重试
+   * （幂等：值相同不写、键已删则跳过）。 */
+  const list = Array.isArray(candidates) ? candidates : wsCandidates;
+  const result = { migrated: 0, cleaned: 0, failed: false };
   let userM = 0;
   try {
     userM = fs.statSync(CONFIG_PATH).mtimeMs;
   } catch (_) {}
-  for (const ws of candidates) {
-    const v = mergedViewFor(ws, user);
-    if (!v.hasFiles) continue; // 草稿等工作区没有项目文件：视图就是 user-only
-    if (v.mtime > bestM) {
-      bestM = v.mtime;
-      best = v.map;
+  /* 收集所有候选工作区的项目层文件（按路径去重，留最新 mtime），升序处理 */
+  const byFile = new Map();
+  for (const ws of list) {
+    for (const file of projectConfigFilesFor(ws)) {
+      let m = 0;
+      try {
+        m = fs.statSync(file).mtimeMs;
+      } catch (_) {
+        continue;
+      }
+      const prev = byFile.get(file);
+      if (prev === undefined || m > prev) byFile.set(file, m);
     }
   }
-  if (userM >= bestM) return user; // 用户级是最近一次写入，或没有任何工作区写入
-  return best;
+  const targets = [...byFile.entries()]
+    .map(([file, mtime]) => ({ file: file, mtime: mtime }))
+    .sort((a, b) => a.mtime - b.mtime);
+  for (const t of targets) {
+    const data = readConfigData(t.file);
+    const ep = data && data.plugins && data.plugins.enabledPlugins;
+    if (!ep || typeof ep !== "object") continue;
+    const ours = Object.keys(ep).filter(isOurPluginKey);
+    if (!ours.length) continue;
+    if (t.mtime > userM) {
+      /* 工作区层比用户级新：是用户最近的拨动意图，迁回用户级 */
+      const userData = readConfigData(CONFIG_PATH);
+      const userPlugins = userData && userData.plugins;
+      const userMap = userPlugins && userPlugins.enabledPlugins;
+      if (!userData || !userPlugins || !userMap || typeof userMap !== "object") {
+        result.failed = true; // 用户级读不了：迁移和清理都不做，下个 tick 重试
+        continue;
+      }
+      let dirty = false;
+      for (const k of ours) {
+        if (userMap[k] !== ep[k]) {
+          userMap[k] = ep[k];
+          result.migrated += 1;
+          dirty = true;
+        }
+      }
+      if (dirty) {
+        if (!writeConfigAtomic(CONFIG_PATH, userData)) {
+          result.failed = true;
+          continue; // 用户级没写成：不清理工作区，避免丢意图
+        }
+        log("归位: " + ours.join(", ") + "（工作区 → 用户级）");
+      }
+    }
+    for (const k of ours) delete ep[k];
+    if (writeConfigAtomic(t.file, data)) {
+      result.cleaned += ours.length;
+      log("清理工作区层: " + t.file + "（移除 " + ours.length + " 个键）");
+    } else {
+      result.failed = true;
+    }
+  }
+  return result;
 }
 
 function readEnabled() {
-  const map = mergedEnabledMap();
+  /* 只读用户级（唯一真相）。读/解析失败返回 null（未知）——轮询撞上写文件
+   * 的中间态时，误判为「一个都没启用」会把模块全部拆掉再装回来。 */
+  const map = readUserEnabledMap();
   if (map === null) return null;
   return enabledModulesFromMap(map);
 }
@@ -318,16 +353,20 @@ function configFingerprint() {
 
 function syncFromConfig(why) {
   /* 幂等的状态同步：只在配置指纹变化时重读，返回本次开关发生变化的模块。
-   * fs.watch 与轮询都走这里，靠指纹去重，不会重复注入。 */
+   * fs.watch 与轮询都走这里，靠指纹去重，不会重复注入。
+   * 0.2.8：指纹变化先做归位（工作区层迁回用户级并清理；失败则不动指纹、
+   * 下个 tick 重试），再按用户级读取应用——归位会改文件，指纹在归位后重取。 */
   const fingerprint = configFingerprint();
   if (fingerprint === null) {
     lastConfigFingerprint = null; // 文件暂时不在：等它回来后重新比对
     return [];
   }
   if (fingerprint === lastConfigFingerprint) return [];
+  const harmonized = harmonizeWorkspaceLayers();
+  if (harmonized.failed) return [];
   const next = readEnabled();
   if (next === null) return []; // 读到半截 JSON：不动指纹，下个 tick 重试
-  lastConfigFingerprint = fingerprint;
+  lastConfigFingerprint = configFingerprint(); // 归位可能改了文件，重新取
   const changed = MODULE_IDS.filter(
     (id) => currentEnabled.includes(id) !== next.includes(id)
   );
@@ -803,7 +842,7 @@ module.exports = {
   onWebContentsCreated,
   enabledModules,
   enabledModulesFromMap,
-  mergedEnabledMap,
+  harmonizeWorkspaceLayers,
   projectConfigFilesFor,
   latestAgentLogPath,
   discoverAgentWorkspace,

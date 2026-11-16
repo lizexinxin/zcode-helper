@@ -240,66 +240,99 @@ test("projectConfigFilesFor 按根→workdir 收集，zcode.json 先于 .zcode/c
   assert.deepStrictEqual(loader.projectConfigFilesFor(root), expect, "workdir 本身就是仓库根");
 });
 
-test("mergedEnabledMap 工作区覆盖用户级：原 desync 两方向都按 UI 语义", () => {
-  // 方向一（原 bug）：用户级 false、工作区 true → on（UI 显示开，loader 必须同步开）
-  writeConfigAtomic({ "zcode-branch-badge@mp": false });
-  const wsOn = makeWorkspace({ "zcode-branch-badge@mp": true });
-  assert.deepStrictEqual(loader.enabledModulesFromMap(loader.mergedEnabledMap(wsOn)), [
-    "branch-badge",
-  ]);
-
-  // 方向二：用户级 true、工作区 false → off（UI 关掉后 loader 必须同步关）
+test("harmonize 工作区较新：值迁回用户级，工作区键被删", () => {
+  const ws = makeWorkspace({ "zcode-branch-badge@mp": false });
   writeConfigAtomic({ "zcode-branch-badge@mp": true });
-  const wsOff = makeWorkspace({ "zcode-branch-badge@mp": false });
-  assert.deepStrictEqual(loader.enabledModulesFromMap(loader.mergedEnabledMap(wsOff)), []);
+  // 用户级压到过去，避免同毫秒写入造成的 mtime 平局
+  const base = fs.statSync(tmpConfig).mtimeMs;
+  fs.utimesSync(tmpConfig, new Date(base - 30000), new Date(base - 30000));
+  const r = loader.harmonizeWorkspaceLayers([ws]);
+  assert.strictEqual(r.migrated, 1);
+  assert.strictEqual(r.cleaned, 1);
+  assert.strictEqual(r.failed, false);
+  const wsData = JSON.parse(fs.readFileSync(path.join(ws, ".zcode", "config.json"), "utf8"));
+  assert.ok(!("zcode-branch-badge@mp" in wsData.plugins.enabledPlugins), "工作区键应被删");
+  assert.deepStrictEqual(loader.readEnabled(), [], "用户级已被迁移为 false → off");
 });
 
-test("无工作区回落用户级；只有 === true 才算启用（与 agent 判定一致）", () => {
+test("harmonize 工作区较旧（陈旧键）：只清理，用户级不被覆盖", () => {
   writeConfigAtomic({ "zcode-branch-badge@mp": true });
-  assert.deepStrictEqual(loader.enabledModulesFromMap(loader.mergedEnabledMap(null)), [
-    "branch-badge",
-  ]);
-  writeConfigAtomic({ "zcode-branch-badge@mp": 1 });
-  assert.deepStrictEqual(loader.enabledModulesFromMap(loader.mergedEnabledMap(null)), []);
+  const ws = makeWorkspace({ "zcode-branch-badge@mp": false });
+  const base = fs.statSync(tmpConfig).mtimeMs;
+  fs.utimesSync(path.join(ws, ".zcode", "config.json"), new Date(base - 10000), new Date(base - 10000));
+  const r = loader.harmonizeWorkspaceLayers([ws]);
+  assert.strictEqual(r.migrated, 0, "陈旧键不迁移");
+  assert.strictEqual(r.cleaned, 1);
+  assert.deepStrictEqual(loader.readEnabled(), ["branch-badge"], "用户级 true 保持");
 });
 
-test("工作区配置解析失败时跳过该层，不误拆模块", () => {
+test("harmonize 值相同：用户级不重写（mtime 不变），键仍被清理", () => {
   writeConfigAtomic({ "zcode-branch-badge@mp": true });
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "zch-wsbad-"));
-  fs.mkdirSync(path.join(ws, ".zcode"), { recursive: true });
-  fs.writeFileSync(path.join(ws, ".zcode", "config.json"), "{ broken");
-  assert.deepStrictEqual(loader.enabledModulesFromMap(loader.mergedEnabledMap(ws)), [
-    "branch-badge",
-  ]);
+  const before = fs.statSync(tmpConfig).mtimeMs;
+  const ws = makeWorkspace({ "zcode-branch-badge@mp": true });
+  const r = loader.harmonizeWorkspaceLayers([ws]);
+  assert.strictEqual(r.migrated, 0, "值相同不迁移");
+  assert.strictEqual(r.cleaned, 1);
+  assert.strictEqual(fs.statSync(tmpConfig).mtimeMs, before, "用户级不应被重写");
+  assert.deepStrictEqual(loader.readEnabled(), ["branch-badge"]);
 });
 
-test("同目录 zcode.json 与 .zcode/config.json 并存时后者优先", () => {
+test("harmonize 保留工作区里其他插件的键", () => {
   writeConfigAtomic({});
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "zch-wstwo-"));
-  fs.writeFileSync(
-    path.join(ws, "zcode.json"),
-    JSON.stringify({ plugins: { enabledPlugins: { "zcode-branch-badge@mp": true } } })
-  );
-  fs.mkdirSync(path.join(ws, ".zcode"), { recursive: true });
-  fs.writeFileSync(
-    path.join(ws, ".zcode", "config.json"),
-    JSON.stringify({ plugins: { enabledPlugins: { "zcode-branch-badge@mp": false } } })
-  );
-  assert.deepStrictEqual(loader.enabledModulesFromMap(loader.mergedEnabledMap(ws)), []);
+  const ws = makeWorkspace({ "feishu-lark@local": false, "zcode-branch-badge@mp": false });
+  loader.harmonizeWorkspaceLayers([ws]);
+  const wsData = JSON.parse(fs.readFileSync(path.join(ws, ".zcode", "config.json"), "utf8"));
+  assert.strictEqual(wsData.plugins.enabledPlugins["feishu-lark@local"], false, "别的插件的键不动");
+  assert.ok(!("zcode-branch-badge@mp" in wsData.plugins.enabledPlugins));
 });
 
-test("用户级 config 损坏时 readEnabled/mergedEnabledMap 返回 null（不误判全关）", () => {
-  writeConfigAtomic({ "zcode-branch-badge@mp": false });
-  loader.syncFromConfig("test"); // 归零
+test("harmonize 清理 zcode.json 里的键", () => {
+  writeConfigAtomic({});
+  const ws = fs.mkdtempSync(path.join(os.tmpdir(), "zch-wszj-"));
+  const zjson = path.join(ws, "zcode.json");
+  fs.writeFileSync(
+    zjson,
+    JSON.stringify({ plugins: { enabledPlugins: { "zcode-folder-full-path@mp": true } } })
+  );
+  const r = loader.harmonizeWorkspaceLayers([ws]);
+  assert.strictEqual(r.cleaned, 1);
+  const data = JSON.parse(fs.readFileSync(zjson, "utf8"));
+  assert.ok(!("zcode-folder-full-path@mp" in data.plugins.enabledPlugins));
+});
+
+test("用户级损坏：harmonize failed=true 不写任何文件（下个 tick 重试）", () => {
+  const ws = makeWorkspace({ "zcode-branch-badge@mp": false });
+  writeConfigAtomic({ "zcode-branch-badge@mp": true });
+  const broken = "{ broken";
   const tmp = tmpConfig + ".tmp";
-  fs.writeFileSync(tmp, "{ broken", "utf8");
+  fs.writeFileSync(tmp, broken, "utf8");
   fs.renameSync(tmp, tmpConfig);
-  assert.strictEqual(loader.readEnabled(), null);
-  assert.strictEqual(loader.mergedEnabledMap(null), null);
+  // rename 会把 mtime 重置为 now：再压到过去，保证工作区比用户级「新」
+  const base = fs.statSync(tmpConfig).mtimeMs;
+  fs.utimesSync(tmpConfig, new Date(base - 30000), new Date(base - 30000));
+  const wsBefore = fs.readFileSync(path.join(ws, ".zcode", "config.json"), "utf8");
+  const r = loader.harmonizeWorkspaceLayers([ws]);
+  assert.strictEqual(r.failed, true);
+  assert.strictEqual(r.migrated, 0);
+  assert.strictEqual(r.cleaned, 0, "迁移不了就不清理，避免丢意图");
+  assert.strictEqual(
+    fs.readFileSync(path.join(ws, ".zcode", "config.json"), "utf8"),
+    wsBefore,
+    "工作区文件保持原样"
+  );
+  assert.strictEqual(loader.readEnabled(), null, "用户级未知：不误判全关");
   writeConfigAtomic({}); // 恢复
 });
 
-test("discoverAgentWorkspace 增量扫描日志建立候选并参与合并", () => {
+test("readEnabled 只认用户级；只有 === true 才算启用（与 agent 判定一致）", () => {
+  writeConfigAtomic({ "zcode-branch-badge@mp": true });
+  assert.deepStrictEqual(loader.readEnabled(), ["branch-badge"]);
+  writeConfigAtomic({ "zcode-branch-badge@mp": 1 });
+  assert.deepStrictEqual(loader.readEnabled(), [], "1 不是 true");
+  writeConfigAtomic({});
+});
+
+test("discoverAgentWorkspace 增量扫描 + harmonize 端到端：工作区拨动被归位", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zch-logdisc-"));
   const prev = process.env.ZCODE_LOADER_LOGDIR;
   process.env.ZCODE_LOADER_LOGDIR = dir;
@@ -307,37 +340,38 @@ test("discoverAgentWorkspace 增量扫描日志建立候选并参与合并", () 
     const log = path.join(dir, "zcode-2020-01-01.jsonl"); // 非今天 → mtime 兜底选中
     const wsA = makeWorkspace({ "zcode-branch-badge@mp": false });
     writeConfigAtomic({ "zcode-branch-badge@mp": true });
+    // 用户级压到过去：wsA（比用户级新）的拨动意图需要被归位
     const base = fs.statSync(tmpConfig).mtimeMs;
     fs.utimesSync(tmpConfig, new Date(base - 30000), new Date(base - 30000));
-    fs.utimesSync(
-      path.join(wsA, ".zcode", "config.json"),
-      new Date(base - 20000),
-      new Date(base - 20000)
-    );
     fs.writeFileSync(log, JSON.stringify({ context: { workspacePath: wsA } }) + "\n");
 
     loader.discoverAgentWorkspace(); // 首扫：全文件建立候选
+    // discover 内部的 syncFromConfig 已触发归位：断言效果而非返回值
     assert.deepStrictEqual(
-      loader.enabledModulesFromMap(loader.mergedEnabledMap()),
+      loader.readEnabled(),
       [],
-      "候选 wsA(false) 比过去时间线的用户级新 → off"
+      "工作区 false 比用户级新 → 已被归位为 off"
+    );
+    assert.deepStrictEqual(
+      JSON.parse(fs.readFileSync(path.join(wsA, ".zcode", "config.json"), "utf8"))
+        .plugins.enabledPlugins,
+      {},
+      "wsA 的键已被清走"
     );
 
-    // 增量：追加 wsB(true) 行（文件 mtime 比 wsA 新）→ 只读新增段落拾取
+    // 增量：追加 wsB(true) 行 → 只读新增段落拾取，再归位
     const wsB = makeWorkspace({ "zcode-branch-badge@mp": true });
+    // 再把用户级压回过去（刚才的归位重写了它），保证 wsB 仍比用户级新
+    const base2 = fs.statSync(tmpConfig).mtimeMs;
+    fs.utimesSync(tmpConfig, new Date(base2 - 30000), new Date(base2 - 30000));
     fs.appendFileSync(log, JSON.stringify({ context: { workspacePath: wsB } }) + "\n");
     loader.discoverAgentWorkspace();
+    assert.deepStrictEqual(loader.readEnabled(), ["branch-badge"], "wsB(true) 归位 → on");
     assert.deepStrictEqual(
-      loader.enabledModulesFromMap(loader.mergedEnabledMap()),
-      ["branch-badge"],
-      "增量出现的 wsB(true) 最新 → on"
-    );
-
-    // 无新内容：重复扫描不产生变化
-    loader.discoverAgentWorkspace();
-    assert.deepStrictEqual(
-      loader.enabledModulesFromMap(loader.mergedEnabledMap()),
-      ["branch-badge"]
+      JSON.parse(fs.readFileSync(path.join(wsB, ".zcode", "config.json"), "utf8"))
+        .plugins.enabledPlugins,
+      {},
+      "wsB 的键也被清走"
     );
   } finally {
     if (prev === undefined) delete process.env.ZCODE_LOADER_LOGDIR;
@@ -384,31 +418,26 @@ test("latestAgentLogPath 优先今天的日志，缺省取最新 mtime", () => {
   }
 });
 
-test("多候选工作区：最后被写入的层胜出（多会话交错场景）", () => {
+test("多工作区都有键：按 mtime 升序迁移，新意图最后落、以最新为准", () => {
   writeConfigAtomic({ "zcode-branch-badge@mp": true });
   const base = fs.statSync(tmpConfig).mtimeMs;
   const wsA = makeWorkspace({ "zcode-branch-badge@mp": false });
   const wsB = makeWorkspace({ "zcode-branch-badge@mp": true });
   const touch = (p, ms) => fs.utimesSync(p, new Date(ms), new Date(ms));
-  // 全部压到过去时间线：用户级 < A < B（避免未来时间戳让用户级永远赢不了）
+  // 全部压到过去时间线：用户级 < A(false) < B(true)
   touch(tmpConfig, base - 30000);
   touch(path.join(wsA, ".zcode", "config.json"), base - 20000);
   touch(path.join(wsB, ".zcode", "config.json"), base - 10000);
-  // B 最后被写 → 跟随 B：on
+  const r = loader.harmonizeWorkspaceLayers([wsA, wsB]);
+  assert.strictEqual(r.migrated, 2);
+  assert.strictEqual(r.cleaned, 2);
   assert.deepStrictEqual(
-    loader.enabledModulesFromMap(loader.mergedEnabledMap([wsA, wsB])),
-    ["branch-badge"]
+    loader.readEnabled(),
+    ["branch-badge"],
+    "两个工作区都被清走，用户级 = 最新意图（B 的 true）"
   );
-  // A 又写了一次（更新）→ 跟随 A：off
-  touch(path.join(wsA, ".zcode", "config.json"), base - 5000);
-  assert.deepStrictEqual(
-    loader.enabledModulesFromMap(loader.mergedEnabledMap([wsA, wsB])),
-    []
-  );
-  // 用户级再写一次（最新）→ 回落用户级：on
-  writeConfigAtomic({ "zcode-branch-badge@mp": true });
-  assert.deepStrictEqual(
-    loader.enabledModulesFromMap(loader.mergedEnabledMap([wsA, wsB])),
-    ["branch-badge"]
-  );
+  for (const ws of [wsA, wsB]) {
+    const data = JSON.parse(fs.readFileSync(path.join(ws, ".zcode", "config.json"), "utf8"));
+    assert.ok(!("zcode-branch-badge@mp" in data.plugins.enabledPlugins), "键应被清走");
+  }
 });

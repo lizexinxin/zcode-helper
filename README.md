@@ -129,17 +129,18 @@ SessionStart / UserPromptSubmit hook（打开会话、每次发消息时触发�
     branch-badge 插件还会顺手 best-effort 拉起本地分支服务
   → app.asar 的 out/main/index.js 尾部只有一行 import() 指针
       → 指向磁盘上的 ~/.zcode/zcode-helper/loader.cjs（常驻主进程）
-          ├─ fs.watch ~/.zcode/cli/config.json（用户级开关）+ 工作区项目文件
-          │   （0.2.7 起 loader 读「合并视图」：用户级打底、工作区覆盖，与 UI
-          │   开关显示同源；工作区从 agent 日志尾部的 workspacePath 自动发现）
+          ├─ 每 1s 检查用户级 ~/.zcode/cli/config.json + 已发现的工作区配置
+          │   （0.2.8 起本插件只认用户级：工作区一旦出现本插件的键，loader 自动
+          │   把值迁回用户级并从工作区删除（归位），工作区层恒为空 → UI 合并
+          │   显示恒等于用户级；工作区从 agent 日志的 workspacePath 自动发现）
           ├─ 开关变化 → webContents.executeJavaScript 注入/拆除模块（DOM 立即变化）
           └─ 新窗口 / 界面重新加载 → 自动把已启用的模块重新注入新界面（模块幂等）
 ```
 
-插件市场开关为什么能即时生效：开关点击经 renderer→window-host→agent RPC 由
-agent 原子写入用户级或工作区级 config，loader 作为纯 observer 每 1s 比对文件
-指纹拾取变化——只读不写，与 UI 从同一份数据推导，不存在两边各存一套状态导致的
-「UI 开着但不生效」。
+插件市场开关为什么能即时生效：开关拨动经 agent 写入当前项目的工作区 config
+（ZCode 内部行为，拦不住），loader 每 1s 检查到变化后自动「归位」——把值迁回
+用户级、从工作区删掉——然后按用户级注入/拆除模块。持久状态永远只落在用户级
+文件里，任何项目里拨、切到任何项目看，开关和效果都一致。
 
 hook 判活与重启提醒：loader 激活时原子写 `~/.zcode/zcode-helper/active.json`
 （pid + 时间戳），hook 用它区分「指针已装但 ZCode 未重启」和「已生效」——前者
