@@ -14,7 +14,7 @@
 目录一多，问题立刻暴露：
 
 - **同名文件夹无法区分**：一个项目同时挂了多个同名目录（比如
-  `~/projects/gitlab/ninebot-ai/aihub` 和
+  `~/projects/gitlab/my-ai/aihub` 和
   `~/projects/gitlab/ops/argocd-application/deployYamls/aihub`），
   界面上就是两行一模一样的 `aihub`，哪个在前哪个在后全靠记，
   一旦选错，任务就在错误的目录里跑。
