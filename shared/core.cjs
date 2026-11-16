@@ -3,15 +3,17 @@
  * 因此本文件的更新无需重启 ZCode（壳与 asar 指针才需要）。
  * 职责：监听插件开关（~/.zcode/cli/config.json 的 enabledPlugins），
  * 用 webContents.executeJavaScript 向渲染进程注入/拆除 UI 模块
- * （~/.zcode/zcode-helper/modules/*.js）；扫描插件缓存自同步新版本资产。
+ * （~/.zcode/zcode-helper/modules/*.js）；扫描插件缓存自同步新版本资产；
+ * 每 10 秒向本地分支服务发心跳（daemon 据此在 ZCode 退出后自动退场）。
  * 任何异常只写 loader.log，绝不抛向主进程。 */
 "use strict";
 
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
+const http = require("node:http");
 
-const CORE_VERSION = "0.2.5";
+const CORE_VERSION = "0.2.6";
 
 const HOME_DIR =
   process.env.ZCODE_LOADER_HOME || path.join(os.homedir(), ".zcode", "zcode-helper");
@@ -53,11 +55,59 @@ const MARKET_READ_JS =
 const BRIDGE_ID = "market-switch-bridge";
 const MARKET_POLL_MS = 1000; // 市场开关探测间隔（用 POLL_MS 的 tick 计数实现）
 
+/* 心跳：向本地分支服务报活（daemon 的自杀依据）。daemon 只在收到过心跳后
+ * 失去心跳才会退出，所以核心活着就要持续发；旧版 daemon 收到 /heartbeat
+ * 返回 404 也无副作用。全部失败静默（daemon 未跑是常态）。 */
+const HEARTBEAT_PORTS = [39217, 39218, 39219, 39220, 39221];
+const HEARTBEAT_EVERY_TICKS = 10; // 1s tick 计数，每 10 秒发一次
+const HEARTBEAT_TIMEOUT_MS = 1500;
+let heartbeatPort = 0; // 上次心跳成功的端口；0 = 未知，全段重试
+
+function tryHeartbeat(port) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const req = http.get(
+      { host: "127.0.0.1", port, path: "/heartbeat", timeout: HEARTBEAT_TIMEOUT_MS },
+      (res) => {
+        res.resume();
+        settled = true;
+        resolve(res.statusCode === 200 ? port : 0);
+      }
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      if (!settled) { settled = true; resolve(0); }
+    });
+    req.on("error", () => {
+      if (!settled) { settled = true; resolve(0); }
+    });
+  });
+}
+
+async function sendHeartbeat(ports) {
+  /* 端口段可用参数覆盖（测试）；已知成功端口提到最前，减少无效请求。 */
+  const base = ports || HEARTBEAT_PORTS;
+  const list =
+    heartbeatPort && base.indexOf(heartbeatPort) !== -1
+      ? [heartbeatPort].concat(base.filter((p) => p !== heartbeatPort))
+      : base;
+  for (const port of list) {
+    const ok = await tryHeartbeat(port);
+    if (ok) {
+      heartbeatPort = ok;
+      return ok;
+    }
+  }
+  heartbeatPort = 0;
+  return 0;
+}
+
 let activated = false;
 let currentEnabled = [];
 let watchTimer = null;
 let pollTimer = null;
 let configWatchHandle = null;
+let heartbeatTicks = 0;
 let lastConfigFingerprint = null;
 let pollTicks = 0;
 
@@ -547,6 +597,11 @@ function watchConfig() {
     runProbe();
     pollTicks += 1;
     selfSyncFromCache();
+    heartbeatTicks += 1;
+    if (heartbeatTicks >= HEARTBEAT_EVERY_TICKS) {
+      heartbeatTicks = 0;
+      sendHeartbeat().catch((exc) => log("心跳发送异常: " + (exc && exc.message)));
+    }
     if (pollTicks * POLL_MS >= MARKET_POLL_MS) {
       pollTicks = 0;
       pollMarketSwitches();
@@ -625,6 +680,9 @@ module.exports = {
   drainMarketIntents,
   setEnabledInConfig,
   selfSyncFromCache,
+  sendHeartbeat,
+  HEARTBEAT_PORTS,
+  HEARTBEAT_EVERY_TICKS,
   BRIDGE_ID,
 };
 

@@ -106,7 +106,7 @@ loader 安装完成后，**插件市场里的开关拨动立即生效**（运行
 | 安装 loader（幂等） | `loader install` |
 | 查看注入状态 | `loader status` |
 | 完全卸载注入 | `loader remove` |
-| 分支服务（徽章数据源） | `daemon start` / `daemon status` |
+| 分支服务（徽章数据源） | `daemon start` / `daemon status` / `daemon stop` |
 
 ```bash
 python3 plugins/zcode-branch-badge/scripts/zcode_helper.py loader status
@@ -161,7 +161,9 @@ hook 判活与重启提醒：loader 激活时原子写 `~/.zcode/zcode-helper/ac
 - **folder-full-path** 模块是纯 CSS 覆盖（锚定 `data-testid` 语义钩子，
   不碰压缩后的 React 代码）；**branch-badge** 模块渲染徽章 DOM 并向
   本地 `zch-branch-daemon`（端口 39217-39221，仅绑定 127.0.0.1，只读 git 查询）
-  查询分支。
+  查询分支。daemon 生命周期免维护：核心每 10 秒向它发一次心跳，ZCode 完全
+  退出后心跳停止，daemon 60 秒内自动退场（从未收到过心跳则保持常驻，
+  兼容旧版核心与手动启动）；也可用 `daemon stop` 手动停止。
 - 每个模块都实现幂等的 `install()/dispose()`：注入的 DOM 带 `data-zch-module`
   标记，拆除时按标记全量清理。
 - 首次安装需要整包重打包 asar（约 307MB，重算 header 与 integrity），

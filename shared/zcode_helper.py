@@ -47,6 +47,8 @@ import struct
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,8 +66,19 @@ else:
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 PATCH_DIR = PLUGIN_ROOT / "patches"
 
-DAEMON_PORTS = list(range(39217, 39222))
+DEFAULT_DAEMON_PORTS = list(range(39217, 39222))
 DAEMON_SCRIPT = PLUGIN_ROOT / "scripts" / "zch_branch_daemon.py"
+
+
+def daemon_ports() -> list[int]:
+    """分支服务端口段：ZCH_BRANCH_PORTS（逗号分隔）可覆盖默认段。
+
+    与 daemon 脚本读同一个环境变量（测试注入专用段、避免碰真实服务，
+    以及用户自定义端口段都走这里）。
+    """
+    raw = os.environ.get("ZCH_BRANCH_PORTS", "")
+    ports = [int(p) for p in raw.split(",") if p.strip()]
+    return ports or DEFAULT_DAEMON_PORTS
 # 本目录是否携带分支服务脚本，决定引擎是否注册 daemon 子命令、
 # status/doctor 是否输出分支服务行（同一份引擎在不同插件下行为自适应）。
 HAS_DAEMON = DAEMON_SCRIPT.is_file()
@@ -461,7 +474,7 @@ def sync_payload_files() -> list[str]:
 
 def find_daemon_port(timeout: float = 0.4) -> int | None:
     """探测本地分支服务的端口段，返回已监听的端口；未运行返回 None。"""
-    for port in DAEMON_PORTS:
+    for port in daemon_ports():
         with socket.socket() as sock:
             sock.settimeout(timeout)
             try:
@@ -472,8 +485,45 @@ def find_daemon_port(timeout: float = 0.4) -> int | None:
     return None
 
 
+def daemon_stop(port: int | None) -> int:
+    """请求分支服务退出：GET /shutdown 后轮询确认进程消失。
+
+    未运行时幂等成功；旧版 daemon（无 /shutdown 端点）返回 404，报告失败
+    并提示手动 kill，绝不误报已停止。
+    """
+    if not port:
+        print("分支服务未运行")
+        return 0
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/shutdown", timeout=3
+        ) as resp:
+            if resp.status != 200:
+                raise OSError(f"非 200 响应：{resp.status}")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            print(
+                f"分支服务（127.0.0.1:{port}）为旧版本，不支持 stop；"
+                "请手动 kill 该进程或重启一次电脑。",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"分支服务停止失败（127.0.0.1:{port}）：{exc}", file=sys.stderr)
+        return 1
+    except (OSError, urllib.error.URLError) as exc:
+        print(f"分支服务停止失败（127.0.0.1:{port}）：{exc}", file=sys.stderr)
+        return 1
+    for _ in range(30):
+        if not find_daemon_port(timeout=0.1):
+            print(f"分支服务已停止（原端口 {port}）")
+            return 0
+        time.sleep(0.1)
+    print(f"分支服务未在超时内退出，可手动 kill：127.0.0.1:{port}", file=sys.stderr)
+    return 1
+
+
 def cmd_daemon(args) -> int:
-    """本地分支服务管理：status 查询；start 幂等拉起（供 hook 和手动调用）。"""
+    """本地分支服务管理：status 查询；start 幂等拉起；stop 请求退出（幂等）。"""
     port = find_daemon_port()
     if args.daemon_cmd == "status":
         if port:
@@ -481,6 +531,8 @@ def cmd_daemon(args) -> int:
             return 0
         print("分支服务未运行（folder-git-branch 徽章不会显示）")
         return 1
+    if args.daemon_cmd == "stop":
+        return daemon_stop(port)
     if port:
         print(f"分支服务已在运行：127.0.0.1:{port}")
         return 0
@@ -936,8 +988,11 @@ def files_equal(src: Path, dst: Path) -> bool:
     而引导壳靠 inode+mtime 指纹判断核心变化——相同内容重拷会白白触发热更新。
     任一文件读不到时返回 False，走正常拷贝。"""
     try:
-        s1, s2 = src.stat(), dst.stat()
-        if not s1.is_file() or not s2.is_file() or s1.st_size != s2.st_size:
+        # stat() 返回的 stat_result 没有 is_file 方法（那是 Path 的）——
+        # 类型判断必须用 Path API，否则 AttributeError 逃出 except OSError
+        if not src.is_file() or not dst.is_file():
+            return False
+        if src.stat().st_size != dst.stat().st_size:
             return False
         return src.read_bytes() == dst.read_bytes()
     except OSError:
@@ -1176,8 +1231,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_loader_toggle.set_defaults(func=cmd_loader, loader_action="toggle")
 
     if HAS_DAEMON:
-        p_daemon = sub.add_parser("daemon", help="本地分支服务（start/status）")
-        p_daemon.add_argument("daemon_cmd", choices=["start", "status"])
+        p_daemon = sub.add_parser("daemon", help="本地分支服务（start/status/stop）")
+        p_daemon.add_argument("daemon_cmd", choices=["start", "status", "stop"])
         p_daemon.set_defaults(func=cmd_daemon)
 
     sub.add_parser("list", help="列出可用补丁").set_defaults(func=cmd_list)
