@@ -129,10 +129,17 @@ SessionStart / UserPromptSubmit hook（打开会话、每次发消息时触发�
     branch-badge 插件还会顺手 best-effort 拉起本地分支服务
   → app.asar 的 out/main/index.js 尾部只有一行 import() 指针
       → 指向磁盘上的 ~/.zcode/zcode-helper/loader.cjs（常驻主进程）
-          ├─ fs.watch ~/.zcode/cli/config.json 的 enabledPlugins（插件开关实时落盘处）
+          ├─ fs.watch ~/.zcode/cli/config.json（用户级开关）+ 工作区项目文件
+          │   （0.2.7 起 loader 读「合并视图」：用户级打底、工作区覆盖，与 UI
+          │   开关显示同源；工作区从 agent 日志尾部的 workspacePath 自动发现）
           ├─ 开关变化 → webContents.executeJavaScript 注入/拆除模块（DOM 立即变化）
           └─ 新窗口 / 界面重新加载 → 自动把已启用的模块重新注入新界面（模块幂等）
 ```
+
+插件市场开关为什么能即时生效：开关点击经 renderer→window-host→agent RPC 由
+agent 原子写入用户级或工作区级 config，loader 作为纯 observer 每 1s 比对文件
+指纹拾取变化——只读不写，与 UI 从同一份数据推导，不存在两边各存一套状态导致的
+「UI 开着但不生效」。
 
 hook 判活与重启提醒：loader 激活时原子写 `~/.zcode/zcode-helper/active.json`
 （pid + 时间戳），hook 用它区分「指针已装但 ZCode 未重启」和「已生效」——前者

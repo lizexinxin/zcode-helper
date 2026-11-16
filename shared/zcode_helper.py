@@ -1053,11 +1053,29 @@ def module_plugin_key(enabled_map: dict, module: str) -> str:
     return "zcode-" + module + "@zcode-helper-marketplace"
 
 
+def workspace_config_path():
+    """当前工作区的 .zcode/config.json（存在才返回路径，否则 None）。
+
+    ZCode 的插件开关在工作区上下文里经 agent 写这个文件，用户级开关写
+    ~/.zcode/cli/config.json；UI 显示的是合并视图（工作区覆盖用户级）。
+    hook/命令以项目目录为 cwd 运行，cwd 下存在该文件即视为工作区上下文。"""
+    candidate = Path.cwd() / ".zcode" / "config.json"
+    try:
+        if candidate.is_file():
+            return candidate
+    except OSError:
+        pass
+    return None
+
+
 def set_module_enabled(module: str, state: str) -> dict:
-    """直接写 ZCode config 的 plugins.enabledPlugins，loader 1s 内拾取生效。
+    """写 ZCode config 的 plugins.enabledPlugins，loader 1s 内拾取生效。
 
     state: on / off / toggle（缺省按当前值取反）。
-    用「临时文件 + os.replace」原子替换，与 ZCode 自己的写法一致。
+    0.2.7 起 loader 读「合并视图」（用户级打底、工作区 .zcode/config.json
+    覆盖），与 UI 开关显示同源——本命令必须把两层一起对齐，否则只写用户级
+    会被工作区层盖回去（开关看起来没反应）。cwd 下存在工作区 config 时参与
+    对齐。用「临时文件 + os.replace」原子替换，与 ZCode 自己的写法一致。
     """
     try:
         data = json.loads(ZCODE_CONFIG_PATH.read_text(encoding="utf-8"))
@@ -1072,8 +1090,31 @@ def set_module_enabled(module: str, state: str) -> dict:
     if not isinstance(enabled_map, dict):
         return {"action": "error", "reason": "config.plugins.enabledPlugins 结构异常"}
 
+    # 工作区层：存在就必须一起写，否则合并视图不生效（工作区覆盖用户级）
+    ws_path = workspace_config_path()
+    ws_data = None
+    ws_map = None
+    if ws_path is not None:
+        try:
+            ws_data = json.loads(ws_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return {"action": "error", "reason": f"读取 {ws_path} 失败: {exc}"}
+        if not isinstance(ws_data, dict):
+            return {"action": "error", "reason": "工作区 config.json 结构异常"}
+        ws_plugins = ws_data.setdefault("plugins", {})
+        if not isinstance(ws_plugins, dict):
+            return {"action": "error", "reason": "工作区 config.plugins 结构异常"}
+        ws_map = ws_plugins.setdefault("enabledPlugins", {})
+        if not isinstance(ws_map, dict):
+            return {"action": "error", "reason": "工作区 config.plugins.enabledPlugins 结构异常"}
+
     key = module_plugin_key(enabled_map, module)
-    current = bool(enabled_map.get(key))
+    ws_key = module_plugin_key(ws_map, module) if ws_map is not None else None
+    # toggle 的「当前值」按合并视图读（工作区覆盖用户级），与 UI 开关显示一致
+    if ws_key is not None and ws_key in ws_map:
+        current = bool(ws_map[ws_key])
+    else:
+        current = bool(enabled_map.get(key))
     target = (not current) if state == "toggle" else (state == "on")
     enabled_map[key] = target
 
@@ -1084,12 +1125,22 @@ def set_module_enabled(module: str, state: str) -> dict:
     except OSError as exc:
         return {"action": "error", "reason": f"写入 {ZCODE_CONFIG_PATH} 失败: {exc}"}
 
+    if ws_map is not None:
+        ws_map[ws_key] = target
+        ws_tmp = ws_path.with_name(ws_path.name + ".zch-tmp")
+        try:
+            ws_tmp.write_text(json.dumps(ws_data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(ws_tmp, ws_path)
+        except OSError as exc:
+            return {"action": "error", "reason": f"写入 {ws_path} 失败: {exc}"}
+
     return {
         "action": "toggled",
         "module": module,
         "plugin": key,
         "enabled": target,
         "previous": current,
+        "workspace": str(ws_path) if ws_map is not None else None,
     }
 
 

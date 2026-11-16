@@ -26,7 +26,6 @@ COPY_MAP = [
     ("core.cjs", "loader/core.cjs"),
     ("modules/folder-full-path.js", "loader/modules/folder-full-path.js"),
     ("modules/branch-badge.js", "loader/modules/branch-badge.js"),
-    ("modules/market-switch-bridge.js", "loader/modules/market-switch-bridge.js"),
 ]
 
 

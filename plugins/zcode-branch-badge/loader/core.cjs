@@ -1,11 +1,12 @@
 /* zch-loader 核心：ZCode 主进程的注入与开关联动逻辑。
  * 由引导壳 loader.cjs 加载；文件变更时壳会 dispose + 热重载本文件，
  * 因此本文件的更新无需重启 ZCode（壳与 asar 指针才需要）。
- * 职责：监听插件开关（~/.zcode/cli/config.json 的 enabledPlugins），
- * 用 webContents.executeJavaScript 向渲染进程注入/拆除 UI 模块
- * （~/.zcode/zcode-helper/modules/*.js）；扫描插件缓存自同步新版本资产；
- * 每 10 秒向本地分支服务发心跳（daemon 据此在 ZCode 退出后自动退场）。
- * 任何异常只写 loader.log，绝不抛向主进程。 */
+ * 职责：作为 observer 读插件开关的合并视图——用户级 ~/.zcode/cli/config.json
+ * 打底、工作区项目文件覆盖（工作区从 agent 日志尾部的 workspacePath 发现）
+ * ——与 UI 开关显示同源，结构性不漂移；用 webContents.executeJavaScript 向
+ * 渲染进程注入/拆除 UI 模块（~/.zcode/zcode-helper/modules/*.js）；扫描插件
+ * 缓存自同步新版本资产；每 10 秒向本地分支服务发心跳（daemon 据此在 ZCode
+ * 退出后自动退场）。任何异常只写 loader.log，绝不抛向主进程。 */
 "use strict";
 
 const fs = require("node:fs");
@@ -13,7 +14,7 @@ const path = require("node:path");
 const os = require("node:os");
 const http = require("node:http");
 
-const CORE_VERSION = "0.2.6";
+const CORE_VERSION = "0.2.7";
 
 const HOME_DIR =
   process.env.ZCODE_LOADER_HOME || path.join(os.homedir(), ".zcode", "zcode-helper");
@@ -42,18 +43,25 @@ const POLL_MS = 1000;
 const PROBE_PATH = path.join(HOME_DIR, "probe.js");
 const PROBE_OUT = path.join(HOME_DIR, "probe.out.log");
 
-/* 插件市场开关联动：ZCode 的开关不写 config，渲染侧的 market-switch-bridge
- * 模块把每次点击意图**追加**进 window.__zchMarketIntents 队列（带递增 seq），
- * 核心 1s 读一次并按水位排水——短时间连拨多个/同一个开关不会互相覆盖。
- * 旧桥接只写单个槽位 window.__zchMarketIntent（会被下一次点击覆盖）：桥接已
- * 更新但核心未重载的过渡窗口里，回退读旧槽位。只认真实点击，不依赖
- * 元素身份（React 重建会让「值变化」推断失效）。 */
-const MARKET_READ_JS =
-  "(function(){return JSON.stringify({" +
-  "q:Array.isArray(window.__zchMarketIntents)?window.__zchMarketIntents:null," +
-  "s:window.__zchMarketIntent||null});})()";
-const BRIDGE_ID = "market-switch-bridge";
-const MARKET_POLL_MS = 1000; // 市场开关探测间隔（用 POLL_MS 的 tick 计数实现）
+/* 插件启用状态合并（observer 架构）：UI 开关点击经 renderer→window-host→agent
+ * RPC（plugins/setEnabled）由 agent 原子写入用户级或工作区级 config，UI 显示
+ * 的是合并视图——project 层覆盖 user 层，越靠近工作目录的文件越后合并越优先
+ * （对齐 zcode.cjs 的 mergeConfigs/discoverProjectConfigPaths）。核心不再反推
+ * UI、不再写 config：读同一份合并视图，显示与生效从同一数据推导，不会漂移。
+ * 0.2.6 及之前的「DOM 桥接点击意图 + 写回用户级 config」链路已删除——它的
+ * 前提（市场开关不写 config.json）实测是错的：开关写的是工作区级文件。 */
+
+/* 工作区发现：app-server（agent）在本机是共享单例——进程名被改写（zcode-cli）、
+ * cwd 固定为数据根（~/.zcode/plugin-workspace）、由 window-host utilityProcess
+ * spawn（主进程拦不到 spawn 与 RPC）。工作区路径只出现在 agent 自己的结构化
+ * 日志里（~/.zcode/cli/log/zcode-*.jsonl，每条请求的 context 都带
+ * workspacePath）。日志是全部会话交错的，「最后一条」未必是当前窗口，所以
+ * 不猜当前窗口：取尾部出现过的候选工作区集合，合并视图以「最后被写入的那层」
+ * 为准——与用户最近一次拨开关的位置一致。格式变化时安静回落 user-only。 */
+const WORKSPACE_SCAN_EVERY_TICKS = 5; // 1s tick 计数，每 5 秒扫一次日志
+const MAX_PROJECT_DEPTH = 15; // workdir 向上找 .git 根的层数封顶
+const LOG_FULLSCAN_CAP = 64 * 1024 * 1024; // 首扫/换文件全量读的封顶
+const MAX_WS_CANDIDATES = 8; // 候选工作区数量上限（新→旧）
 
 /* 心跳：向本地分支服务报活（daemon 的自杀依据）。daemon 只在收到过心跳后
  * 失去心跳才会退出，所以核心活着就要持续发；旧版 daemon 收到 /heartbeat
@@ -110,6 +118,11 @@ let configWatchHandle = null;
 let heartbeatTicks = 0;
 let lastConfigFingerprint = null;
 let pollTicks = 0;
+let workspaceScanTicks = 0;
+let wsCandidates = []; // agent 日志里出现过的候选工作区（LRU：最近出现的在前，封顶）
+let lastWsSig = ""; // 候选集合签名（集合变化才触发重算，日志滚动不触发）
+let logScanFile = null; // 增量扫描状态：当前扫到的文件与字节偏移
+let logScanOffset = 0;
 
 function log(msg) {
   try {
@@ -139,114 +152,168 @@ function writeActive() {
   }
 }
 
-function enabledModules(configData) {
-  /* 插件 id 形如 "zcode-<模块名>@<market>"，enabled 时映射到对应模块。 */
-  if (!configData || typeof configData !== "object") return [];
-  const ep = (configData.plugins && configData.plugins.enabledPlugins) || {};
+function enabledModulesFromMap(map) {
+  /* enabledPlugins 键值对（任意层级合并后的）→ 启用的模块列表。
+   * 与 agent 判定一致：显式 === true 才算启用（内置插件默认启用集不适用
+   * 于本插件——它们不是官方内置）。 */
   const on = new Set();
-  for (const [id, enabled] of Object.entries(ep || {})) {
-    if (!enabled) continue;
+  for (const [id, enabled] of Object.entries(map || {})) {
+    if (enabled !== true) continue;
     const name = String(id).split("@")[0];
     if (name.startsWith(PLUGIN_PREFIX)) on.add(name.slice(PLUGIN_PREFIX.length));
   }
   return MODULE_IDS.filter((m) => on.has(m));
 }
 
-function readEnabled() {
-  /* 读/解析失败返回 null（未知），不要当成「一个都没启用」——轮询撞上
-   * ZCode 写 config 的中间态时，误判为 [] 会把模块全部拆掉再装回来。 */
+function enabledModules(configData) {
+  /* 兼容入口：完整 config 对象（{plugins:{enabledPlugins}}）→ 启用模块。
+   * 插件 id 形如 "zcode-<模块名>@<market>"。 */
+  if (!configData || typeof configData !== "object") return [];
+  const ep = (configData.plugins && configData.plugins.enabledPlugins) || {};
+  return enabledModulesFromMap(ep);
+}
+
+function readUserEnabledMap() {
+  /* 用户级 config 的 enabledPlugins。读/解析失败返回 null（未知）——轮询
+   * 撞上 ZCode 写 config 的中间态时，误判为「一个都没启用」会把模块全部
+   * 拆掉再装回来。 */
   try {
-    return enabledModules(JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8")));
+    const data = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+    return (data && data.plugins && data.plugins.enabledPlugins) || {};
   } catch (exc) {
-    log("readEnabled 失败: " + (exc && exc.message));
+    log("读用户级 config 失败: " + (exc && exc.message));
     return null;
   }
+}
+
+function readLayerEnabledMap(file) {
+  /* 单个项目层配置文件（zcode.json / .zcode/config.json）的 enabledPlugins。
+   * 只收存在的文件，读/解析失败视为跳过该层（留痕，不影响其他层）。 */
+  let raw;
+  try {
+    raw = fs.readFileSync(file, "utf8");
+  } catch (exc) {
+    log("读项目配置失败(跳过该层): " + file + " " + (exc && exc.message));
+    return null;
+  }
+  try {
+    const data = JSON.parse(raw);
+    return (data && data.plugins && data.plugins.enabledPlugins) || {};
+  } catch (exc) {
+    log("解析项目配置失败(跳过该层): " + file + " " + (exc && exc.message));
+    return null;
+  }
+}
+
+function activeWorkspace() {
+  /* 兼容保留：自动模式下没有单一「活动工作区」（见 mergedEnabledMap），
+   * 这里返回最新的候选，仅供日志/诊断。 */
+  return wsCandidates.length ? wsCandidates[0] : null;
+}
+
+function mergedViewFor(ws, user) {
+  /* user 打底 + 指定工作区的项目文件按序覆盖，返回 { map, mtime, hasFiles }。
+   * mtime 取该项目文件的最新修改时间（= 该层最后一次被写的时间）。 */
+  const files = projectConfigFilesFor(ws);
+  const map = Object.assign({}, user);
+  let mtime = 0;
+  for (const f of files) {
+    try {
+      const st = fs.statSync(f);
+      if (st.mtimeMs > mtime) mtime = st.mtimeMs;
+    } catch (_) {}
+    const layer = readLayerEnabledMap(f);
+    if (layer) Object.assign(map, layer);
+  }
+  return { map: map, mtime: mtime, hasFiles: files.length > 0 };
+}
+
+function projectConfigFilesFor(workdir) {
+  /* 对齐 agent 的 project 配置发现：从 workdir 向上走到 .git 根（无 .git 则
+   * 到 home 为止，层数封顶），根目录在前、workdir 在后；每目录按 zcode.json、
+   * .zcode/config.json 顺序收集存在的文件——合并顺序即优先级，越靠近
+   * workdir 越后合并、越优先。 */
+  const dirs = [];
+  let dir = path.resolve(workdir);
+  const home = os.homedir();
+  for (let depth = 0; dir && depth < MAX_PROJECT_DEPTH; depth++) {
+    dirs.push(dir);
+    if (fs.existsSync(path.join(dir, ".git"))) break; // 仓库根：到此为止
+    const parent = path.dirname(dir);
+    if (parent === dir || dir === home) break;
+    dir = parent;
+  }
+  dirs.reverse(); // 根目录在前、workdir 在后
+  const files = [];
+  for (const d of dirs) {
+    for (const name of ["zcode.json", path.join(".zcode", "config.json")]) {
+      const f = path.join(d, name);
+      try {
+        if (fs.statSync(f).isFile()) files.push(f);
+      } catch (_) {}
+    }
+  }
+  return files;
+}
+
+function mergedEnabledMap(workdir) {
+  /* 复刻 agent 的合并语义：user 层打底，project 层按「根→workdir」顺序覆盖。
+   * 返回 null 表示用户级未知（保持不拆装语义）。
+   * workdir 为字符串（测试）：直接合并该工作区；为数组（测试）：作为候选集；
+   * 缺省用模块状态里日志发现出的 wsCandidates。自动模式下多会话日志交错出
+   * 多个候选工作区，loader 的模块又是全局的，没法知道「当前窗口」是哪个
+   * ——以「最后被写入的那层」为准，与用户最近一次拨开关的位置一致；用户级
+   * 更新或候选都没有项目文件（如草稿会话）时回落 user-only。 */
+  const user = readUserEnabledMap();
+  if (user === null) return null;
+  if (typeof workdir === "string") return mergedViewFor(workdir, user).map;
+  const candidates = Array.isArray(workdir) ? workdir : wsCandidates;
+  let best = null;
+  let bestM = 0;
+  let userM = 0;
+  try {
+    userM = fs.statSync(CONFIG_PATH).mtimeMs;
+  } catch (_) {}
+  for (const ws of candidates) {
+    const v = mergedViewFor(ws, user);
+    if (!v.hasFiles) continue; // 草稿等工作区没有项目文件：视图就是 user-only
+    if (v.mtime > bestM) {
+      bestM = v.mtime;
+      best = v.map;
+    }
+  }
+  if (userM >= bestM) return user; // 用户级是最近一次写入，或没有任何工作区写入
+  return best;
+}
+
+function readEnabled() {
+  const map = mergedEnabledMap();
+  if (map === null) return null;
+  return enabledModulesFromMap(map);
 }
 
 function configFingerprint() {
-  /* 用 inode + mtime + size 判断文件是否换过：ZCode 写 config 是「写临时文件
-   * + rename」，rename 之后 inode 变化（macOS 上 fs.watch 正是因此失效）。 */
+  /* 组合指纹：用户级 config + 全部候选工作区的项目层文件 + 候选集合本身，
+   * 任一变化都算换过。ZCode 写 config 是「写临时文件 + rename」，rename 之后
+   * inode 变化（macOS 上 fs.watch 正是因此失效），mtime/size 一并比对。
+   * 用户级暂时不在时返回 null，维持「等它回来再比对」的原语义。 */
+  const parts = [];
   try {
     const st = fs.statSync(CONFIG_PATH);
-    return st.ino + ":" + st.mtimeMs + ":" + st.size;
+    parts.push("u:" + st.ino + ":" + st.mtimeMs + ":" + st.size);
   } catch (_) {
     return null;
   }
-}
-
-function diffMarketIntent(state, intent) {
-  /* 旧协议：intent 由旧版 market-switch-bridge 写入单个槽位，带 at 时间戳；
-   * 同一个点击只处理一次。返回 { moduleId: enabled } 或 null。 */
-  if (!intent || typeof intent !== "object") return null;
-  if (!intent.module || typeof intent.enabled !== "boolean") return null;
-  if (!intent.at || state.at === intent.at) return null;
-  state.at = intent.at;
-  const changed = {};
-  changed[intent.module] = intent.enabled;
-  return changed;
-}
-
-function drainMarketIntents(state, entries) {
-  /* 新协议：按 seq 水位排水意图队列——seq 大于已处理水位的条目按序合并
-   * （同模块后一次点击覆盖前一次），返回 { moduleId: enabled } 或 null。
-   * 轮询重叠会重复读到同一批条目：水位未推进时返回 null，天然幂等。 */
-  if (!Array.isArray(entries)) return null;
-  const watermark = state.seq || 0;
-  const changed = {};
-  let maxSeq = watermark;
-  for (const it of entries) {
-    if (!it || typeof it !== "object") continue;
-    if (typeof it.module !== "string" || !it.module) continue;
-    if (typeof it.enabled !== "boolean") continue;
-    const seq = Number(it.seq) || 0;
-    if (seq <= watermark) continue;
-    changed[it.module] = it.enabled;
-    if (seq > maxSeq) maxSeq = seq;
-  }
-  if (maxSeq === watermark) return null;
-  state.seq = maxSeq;
-  return changed;
-}
-
-function setEnabledInConfig(changes) {
-  /* 把 UI 开关状态写回 ZCode config（原子替换），返回实际生效的模块。
-   * 写完后由 syncFromConfig 感知并注入/拆除，loader 自身也监听这个文件。 */
-  const applied = {};
-  let data;
-  try {
-    data = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
-  } catch (exc) {
-    log("写 config 前读取失败: " + (exc && exc.message));
-    return applied;
-  }
-  const plugins = (data && data.plugins) || (data.plugins = {});
-  const enabledMap = plugins.enabledPlugins || (plugins.enabledPlugins = {});
-  let dirty = false;
-  for (const key of Object.keys(changes)) {
-    const prefix = "zcode-" + key;
-    const pluginId = Object.keys(enabledMap).find(
-      (id) => id === prefix || id.indexOf(prefix + "@") === 0
-    );
-    if (!pluginId) {
-      log("config 里没有插件 " + key + "，跳过 UI 开关同步");
-      continue;
-    }
-    if (enabledMap[pluginId] !== changes[key]) {
-      enabledMap[pluginId] = changes[key];
-      applied[key] = changes[key];
-      dirty = true;
+  for (const ws of wsCandidates) {
+    for (const f of projectConfigFilesFor(ws)) {
+      try {
+        const st = fs.statSync(f);
+        parts.push(f + "@" + st.ino + ":" + st.mtimeMs + ":" + st.size);
+      } catch (_) {}
     }
   }
-  if (!dirty) return applied;
-  const tmp = CONFIG_PATH + ".zch-ui-tmp";
-  try {
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
-    fs.renameSync(tmp, CONFIG_PATH); // 原子替换，避免写一半被读到
-  } catch (exc) {
-    log("写 config 失败: " + (exc && exc.message));
-    return {};
-  }
-  return applied;
+  if (wsCandidates.length) parts.push("c:" + wsCandidates.join(">"));
+  return parts.join("|");
 }
 
 function syncFromConfig(why) {
@@ -326,15 +393,12 @@ function applyToContents(wc, enabled) {
   } catch (_) {}
   const state = stateOf(wc);
   const plan = injectionsFor(state, enabled);
-  if (state.__bridge !== true) plan.unshift({ id: BRIDGE_ID, want: true });
   if (!plan.length) return; // 状态未变：什么都不做
   for (const step of plan) {
     const id = step.id;
     const want = step.want;
-    const isBridge = id === BRIDGE_ID;
     // 先记状态，避免并发重复
-    if (isBridge) state.__bridge = true;
-    else state[id] = want;
+    state[id] = want;
     wc.executeJavaScript(runnerFor(id, want), true)
       .then((res) => {
         if (typeof res === "string" && (res.indexOf("ok") === 0 || res.indexOf("already") === 0)) {
@@ -342,13 +406,11 @@ function applyToContents(wc, enabled) {
           return;
         }
         // missing / missing-file：页面可能还没就绪，回滚状态让下次重放重试
-        if (isBridge) delete state.__bridge;
-        else delete state[id];
+        delete state[id];
         log("注入 " + id + "(" + want + ") 未生效 → " + res + label);
       })
       .catch((exc) => {
-        if (isBridge) delete state.__bridge;
-        else delete state[id];
+        delete state[id];
         log("注入 " + id + "(" + want + ") 失败: " + (exc && exc.message) + label);
       });
   }
@@ -372,7 +434,6 @@ function replayOnLoad(wc) {
   wc.on("dom-ready", () => {
     try {
       wc.__zchState = {}; // 新页面、新 JS world：模块都不在了，必须重注
-      wc.__zchMarketState = { seq: 0, at: 0 }; // 意图序号随页面世界一起重置
     } catch (_) {
       return;
     }
@@ -422,52 +483,121 @@ function runProbe() {
   }
 }
 
-function pollMarketSwitches() {
-  /* 每 1s 读一次渲染侧的「点击意图」：新协议读意图队列（按水位排水，
-   * 连拨不丢），旧桥接只有单个槽位时回退旧协议；有新的就写回 config 并立即应用。 */
-  let webContents;
+function agentLogDir() {
+  /* agent 结构化日志目录（~/.zcode/cli/log），测试可用环境变量重定向 */
+  return (
+    process.env.ZCODE_LOADER_LOGDIR || path.join(os.homedir(), ".zcode", "cli", "log")
+  );
+}
+
+function latestAgentLogPath() {
+  /* 今天的 zcode-YYYY-MM-DD.jsonl；不存在则取 mtime 最新的 jsonl（跨天边界） */
+  const now = new Date();
+  const ymd =
+    now.getFullYear() +
+    "-" +
+    String(now.getMonth() + 1).padStart(2, "0") +
+    "-" +
+    String(now.getDate()).padStart(2, "0");
+  const today = path.join(agentLogDir(), "zcode-" + ymd + ".jsonl");
   try {
-    ({ webContents } = require("electron"));
-  } catch (_) {
-    return; // 非主进程环境（测试）
-  }
-  for (const wc of webContents.getAllWebContents()) {
-    if (!wc || wc.isDestroyed()) continue;
-    let type = "";
-    try {
-      type = wc.getType();
-    } catch (_) {
-      continue;
+    if (fs.statSync(today).isFile()) return today;
+  } catch (_) {}
+  try {
+    let best = null;
+    let bestM = 0;
+    for (const f of fs.readdirSync(agentLogDir())) {
+      if (!/\.jsonl$/.test(f)) continue;
+      const p = path.join(agentLogDir(), f);
+      let m = 0;
+      try {
+        m = fs.statSync(p).mtimeMs;
+      } catch (_) {
+        continue;
+      }
+      if (m > bestM) {
+        bestM = m;
+        best = p;
+      }
     }
-    if (type !== "window") continue;
-    const state = wc.__zchMarketState || (wc.__zchMarketState = { seq: 0, at: 0 });
-    wc.executeJavaScript(MARKET_READ_JS, true)
-      .then((raw) => {
-        let payload = null;
-        try {
-          payload = JSON.parse(raw);
-        } catch (_) {
-          return; // 页面在导航等：下个 tick 重试
-        }
-        let changed = null;
-        if (payload && Array.isArray(payload.q)) {
-          changed = drainMarketIntents(state, payload.q);
-        } else if (payload && payload.s) {
-          changed = diffMarketIntent(state, payload.s);
-        }
-        if (!changed) return;
-        log("市场开关点击: " + JSON.stringify(changed));
-        const applied = setEnabledInConfig(changed);
-        if (!Object.keys(applied).length) {
-          log("市场开关点击未能写入 config");
-          return;
-        }
-        syncFromConfig("市场开关");
-      })
-      .catch(() => {
-        /* 页面在导航等：忽略 */
-      });
+    return best;
+  } catch (_) {
+    return null;
   }
+}
+
+function readRange(file, from, to) {
+  /* 读文件 [from, to) 字节区间；出错返回空串 */
+  const len = to - from;
+  if (len <= 0) return "";
+  const buf = Buffer.alloc(len);
+  let read = 0;
+  try {
+    const fd = fs.openSync(file, "r");
+    try {
+      read = fs.readSync(fd, buf, 0, len, from);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (_) {
+    return "";
+  }
+  return buf.toString("utf8", 0, read);
+}
+
+function tailText(file, bytes) {
+  /* 只读文件末尾 bytes 字节（诊断用）；文件不存在返回空串 */
+  let st;
+  try {
+    st = fs.statSync(file);
+  } catch (_) {
+    return "";
+  }
+  return readRange(file, Math.max(0, st.size - bytes), st.size);
+}
+
+function discoverAgentWorkspace() {
+  /* 增量扫描 agent 日志，维护候选工作区集合（LRU，最近出现的在最前）：
+   * 首扫/换日志文件/文件被截断时全量读（封顶 64MB），之后只读新增段落——
+   * 日志可能很大且 workspacePath 行稀疏，固定尾巴窗口会漏。集合变化时
+   * 触发重算；日志写坏或格式变化就维持现状（回落 user-only）。 */
+  const file = latestAgentLogPath();
+  if (!file) return;
+  let size = 0;
+  try {
+    size = fs.statSync(file).size;
+  } catch (_) {
+    return;
+  }
+  if (file !== logScanFile || size < logScanOffset) {
+    logScanFile = file; // 跨天换文件 / 截断：从头扫
+    logScanOffset = 0;
+  }
+  if (size === logScanOffset) return; // 无新内容
+  const from =
+    logScanOffset === 0 ? Math.max(0, size - LOG_FULLSCAN_CAP) : logScanOffset;
+  const text = readRange(file, from, size);
+  logScanOffset = size;
+  let changed = false;
+  const re = /"workspacePath":"([^"]+)"/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const idx = wsCandidates.indexOf(m[1]);
+    if (idx > 0) wsCandidates.splice(idx, 1); // 已有：提到最前（LRU）
+    if (idx !== 0) {
+      wsCandidates.unshift(m[1]);
+      changed = true;
+      if (wsCandidates.length > MAX_WS_CANDIDATES) {
+        wsCandidates.length = MAX_WS_CANDIDATES;
+      }
+    }
+  }
+  if (!changed) return;
+  const sig = wsCandidates.join(">");
+  if (sig === lastWsSig) return;
+  lastWsSig = sig;
+  log("候选工作区(来自 agent 日志): " + wsCandidates.join(", "));
+  syncFromConfig("工作区变化");
 }
 
 function semverKey(v) {
@@ -596,15 +726,16 @@ function watchConfig() {
     syncFromConfig("轮询");
     runProbe();
     pollTicks += 1;
+    workspaceScanTicks += 1;
+    if (workspaceScanTicks >= WORKSPACE_SCAN_EVERY_TICKS) {
+      workspaceScanTicks = 0;
+      discoverAgentWorkspace();
+    }
     selfSyncFromCache();
     heartbeatTicks += 1;
     if (heartbeatTicks >= HEARTBEAT_EVERY_TICKS) {
       heartbeatTicks = 0;
       sendHeartbeat().catch((exc) => log("心跳发送异常: " + (exc && exc.message)));
-    }
-    if (pollTicks * POLL_MS >= MARKET_POLL_MS) {
-      pollTicks = 0;
-      pollMarketSwitches();
     }
   }, POLL_MS);
   if (pollTimer && typeof pollTimer.unref === "function") pollTimer.unref();
@@ -623,7 +754,6 @@ function activate() {
     for (const wc of webContents.getAllWebContents()) {
       try {
         wc.__zchState = {};
-        wc.__zchMarketState = { seq: 0, at: 0 };
       } catch (_) {}
     }
     for (const wc of webContents.getAllWebContents()) {
@@ -633,6 +763,7 @@ function activate() {
     }
     applyAll(currentEnabled, "activate");
     watchConfig();
+    discoverAgentWorkspace(); // 立即发现工作区，不等第一个 5s tick
   } catch (exc) {
     log("activate 失败: " + (exc && exc.message));
   }
@@ -671,19 +802,22 @@ module.exports = {
   dispose,
   onWebContentsCreated,
   enabledModules,
+  enabledModulesFromMap,
+  mergedEnabledMap,
+  projectConfigFilesFor,
+  latestAgentLogPath,
+  discoverAgentWorkspace,
+  tailText,
+  readEnabled,
   MODULE_IDS,
   CORE_VERSION,
   runnerFor,
   syncFromConfig,
   injectionsFor,
-  diffMarketIntent,
-  drainMarketIntents,
-  setEnabledInConfig,
   selfSyncFromCache,
   sendHeartbeat,
   HEARTBEAT_PORTS,
   HEARTBEAT_EVERY_TICKS,
-  BRIDGE_ID,
 };
 
 /* 独立自检：node shared/core.cjs 打印当前启用模块与核心版本 */

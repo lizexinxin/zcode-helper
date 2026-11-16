@@ -56,6 +56,7 @@ def run_tool(asar: Path, td: Path, *args: str, extra_env: dict | None = None) ->
         capture_output=True,
         text=True,
         env=env,
+        cwd=str(td),  # 隔离 cwd：toggle 的工作区探测只看 cwd 下的 .zcode/config.json
     )
 
 
@@ -210,6 +211,59 @@ def test_toggle_reports_error_on_broken_config():
         assert proc.returncode == 2
         payload = last_json(proc.stdout)
         assert payload and payload["action"] == "error"
+
+
+def test_toggle_aligns_workspace_layer():
+    """工作区 .zcode/config.json 存在时两层一起写；toggle 按合并视图取反。
+
+    0.2.7 起 loader 读合并视图（工作区覆盖用户级），与 UI 开关同源——只写
+    用户级会被工作区层盖回去，所以必须两层对齐。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        td = Path(tmp)
+        asar = td / "app.asar"
+        zh.write_asar(asar, make_files())
+        make_assets(td)
+        cfg = td / "zcode-config.json"
+        # 用户级 False、工作区 True：合并视图 on（UI 显示开），toggle 应得 off
+        cfg.write_text(
+            json.dumps({"plugins": {"enabledPlugins": {
+                "zcode-branch-badge@zcode-helper-marketplace": False,
+            }}}),
+            encoding="utf-8",
+        )
+        ws_dir = td / ".zcode"
+        ws_dir.mkdir()
+        ws_cfg = ws_dir / "config.json"
+        ws_cfg.write_text(
+            json.dumps({"plugins": {"enabledPlugins": {
+                "zcode-branch-badge@zcode-helper-marketplace": True,
+                "feishu-lark@local": False,
+            }}}),
+            encoding="utf-8",
+        )
+
+        proc = run_tool(asar, td, "--json", "loader", "toggle", "branch-badge", extra_env={"ZCODE_CONFIG": str(cfg)})
+        assert proc.returncode == 0, proc.stderr
+        payload = last_json(proc.stdout)
+        assert payload and payload["action"] == "toggled", proc.stdout
+        assert payload["previous"] is True, "当前值应取合并视图（工作区覆盖用户级）"
+        assert payload["enabled"] is False
+        # macOS 上 tempfile 路径含 /var→/private/var 软链，cwd 返回真实路径，按 resolve 比较
+        assert Path(payload["workspace"]).resolve() == ws_cfg.resolve()
+        # 两层都对齐为 False；工作区其他键保留不动
+        user = json.loads(cfg.read_text())
+        assert user["plugins"]["enabledPlugins"]["zcode-branch-badge@zcode-helper-marketplace"] is False
+        ws_data = json.loads(ws_cfg.read_text())
+        assert ws_data["plugins"]["enabledPlugins"]["zcode-branch-badge@zcode-helper-marketplace"] is False
+        assert ws_data["plugins"]["enabledPlugins"]["feishu-lark@local"] is False
+
+        # 再 toggle 回来：当前值读合并视图（现在两层都是 False）→ True
+        payload = last_json(
+            run_tool(asar, td, "--json", "loader", "toggle", "branch-badge", extra_env={"ZCODE_CONFIG": str(cfg)}).stdout
+        )
+        assert payload["previous"] is False and payload["enabled"] is True
+        ws_data = json.loads(ws_cfg.read_text())
+        assert ws_data["plugins"]["enabledPlugins"]["zcode-branch-badge@zcode-helper-marketplace"] is True
 
 
 def test_sync_version_guard_blocks_downgrade():
